@@ -10,8 +10,8 @@ env/
 # Node
 node_modules/
 
-# Build artifacts (regenerated on each machine)
-frontend/dist/
+# Build artifacts (NOT ignored - Windows needs pre-built frontend)
+# frontend/dist/
 
 # User data (each machine has its own)
 *.db
