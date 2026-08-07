@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+.venv-py312/
+venv/
+env/
+
+# Node
+node_modules/
+
+# Build artifacts (regenerated on each machine)
+frontend/dist/
+
+# User data (each machine has its own)
+*.db
+*.db-journal
+data/backups/
+backend/app/storage/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# Logs
+*.log
