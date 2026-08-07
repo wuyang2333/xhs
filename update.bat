@@ -1,7 +1,8 @@
 @echo off
 cd /d C:\XHS
 echo Updating...
-git pull
+git fetch origin
+git reset --hard origin/main
 echo.
 echo ============================================
 echo   Update done. Press any key to restart.
