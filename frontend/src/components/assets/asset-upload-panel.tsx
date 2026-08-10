@@ -1,4 +1,4 @@
-import { InboxOutlined, UploadOutlined } from "@ant-design/icons";
+import { FolderOpenOutlined, InboxOutlined, UploadOutlined } from "@ant-design/icons";
 import {
   Button,
   Card,
@@ -15,7 +15,7 @@ import {
   Upload,
   message as antMessage,
 } from "antd";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createMediaAsset, uploadAssetFile } from "../../lib/api";
 import type { AssetFolder, AssetScene, AssetTag, Product } from "../../types";
@@ -59,6 +59,7 @@ export function AssetUploadPanel({
   const [uploadingCount, setUploadingCount] = useState(0);
   const [uploadFailedCount, setUploadFailedCount] = useState(0);
   const [failedNames, setFailedNames] = useState<string[]>([]);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const folderOptions = useMemo<FolderSelectOption[]>(
     () => buildFolderSelectOptions(buildFolderTree(folders)),
@@ -82,12 +83,15 @@ export function AssetUploadPanel({
   /**
    * 两步链路：先把文件传到 /files/upload 拿 UploadedFile，
    * 再 POST /assets 落成素材记录。只做第一步的话素材库里什么都不会出现。
+   * folderPathOverride 用于文件夹上传——从文件的 webkitRelativePath 提取路径，
+   * 自动按文件夹结构创建对应层级。
    */
-  async function uploadOne(file: File): Promise<void> {
+  async function uploadOne(file: File, folderPathOverride?: string): Promise<void> {
     setUploadingCount((count) => count + 1);
     try {
       const uploaded = await uploadAssetFile(file);
-      const trimmedPath = folderPath.trim();
+      const effectivePath = folderPathOverride ?? folderPath.trim();
+      const useOverride = Boolean(folderPathOverride);
       await createMediaAsset({
         asset_type: uploaded.asset_type,
         url: uploaded.download_url,
@@ -96,12 +100,17 @@ export function AssetUploadPanel({
         mime_type: file.type,
         file_size: uploaded.size,
         source: "upload",
-        // folder_id 与 folder_path 同时给时后端以 folder_id 为准，所以按模式二选一。
-        ...(targetMode === "folder"
-          ? { folder_id: folderId }
-          : trimmedPath
-            ? { folder_path: trimmedPath }
-            : {}),
+        // 文件夹上传时用文件自身的相对路径，忽略界面上选的文件夹。
+        // 普通上传时按界面选择走。
+        ...(useOverride
+          ? effectivePath
+            ? { folder_path: effectivePath }
+            : {}
+          : targetMode === "folder"
+            ? { folder_id: folderId }
+            : effectivePath
+              ? { folder_path: effectivePath }
+              : {}),
         product_id: productId,
         scene_id: sceneId,
         tag_ids: tagIds,
@@ -117,6 +126,30 @@ export function AssetUploadPanel({
         return next;
       });
     }
+  }
+
+  /** 文件夹上传：从 input[webkitdirectory] 拿到所有文件，按各自相对路径归档。 */
+  async function handleFolderUpload(event: React.ChangeEvent<HTMLInputElement>): Promise<void> {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    // 只保留图片和视频
+    const imageFiles = Array.from(files).filter((f) => f.type.startsWith("image/") || f.type.startsWith("video/"));
+    if (imageFiles.length === 0) {
+      antMessage.warning("所选文件夹中没有图片或视频文件。");
+      return;
+    }
+    resetCounters();
+    setTotalCount(imageFiles.length);
+    for (const file of imageFiles) {
+      // webkitRelativePath 形如 "坐浴盆/白底产品图/img1.png"
+      // 提取最后一级之前的部分作为 folder_path
+      const relativePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || "";
+      const lastSlash = relativePath.lastIndexOf("/");
+      const folderPath = lastSlash > 0 ? relativePath.substring(0, lastSlash) : "";
+      await uploadOne(file, folderPath);
+    }
+    // 清空 input 让同一文件夹能再次选择
+    if (folderInputRef.current) folderInputRef.current.value = "";
   }
 
   const progressPercent = totalCount === 0 ? 0 : Math.round(((doneCount + uploadFailedCount) / totalCount) * 100);
@@ -232,6 +265,28 @@ export function AssetUploadPanel({
           上传后自动落成素材记录，带上以上产品 / 场景 / 标签
         </Text>
       </Upload.Dragger>
+
+      {/* 文件夹上传：选择整个文件夹，按其内部结构自动创建对应文件夹层级 */}
+      <input
+        ref={folderInputRef}
+        type="file"
+        // @ts-expect-error webkitdirectory 是非标准属性，TypeScript 不认识但浏览器支持
+        webkitdirectory=""
+        directory=""
+        multiple
+        accept="image/*,video/*"
+        style={{ display: "none" }}
+        onChange={(event) => void handleFolderUpload(event)}
+      />
+      <Button
+        icon={<FolderOpenOutlined />}
+        disabled={isUploading}
+        onClick={() => folderInputRef.current?.click()}
+        block
+        style={{ marginTop: 8 }}
+      >
+        上传文件夹（按内部结构自动建文件夹）
+      </Button>
 
       {totalCount > 0 && (
         <div style={{ marginTop: 12 }}>
