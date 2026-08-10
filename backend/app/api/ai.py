@@ -208,23 +208,37 @@ def _register_ai_media_asset(
 
 
 def _remove_ai_watermark(file_path: Path) -> None:
-    """Remove visible AI watermarks and strip AI metadata from a generated image.
+    """Remove AI watermarks from a generated image.
 
-    Uses remove-ai-watermarks[visible] — no GPU needed. Failures are logged
-    but never block the image from being returned; the user gets the original
-    with watermark if removal fails.
+    Tries remove_all (visible + invisible + metadata) first — needs GPU.
+    Falls back to remove_visible (visible + metadata) — no GPU needed.
+    Falls back to nothing if the tool isn't installed.
+    Failures never block the image; the user gets the original if all else fails.
     """
     import sys
 
+    # Try remove_all first (covers invisible watermarks via diffusion).
+    # This needs torch + CUDA; if not installed or no GPU, it will fail and
+    # we fall back to visible-only.
+    try:
+        from remove_ai_watermarks.api import remove_all
+        try:
+            remove_all(str(file_path), str(file_path))
+            return
+        except Exception as exc:
+            print(f"[去水印] all 模式失败，降级到 visible：{exc}", file=sys.stderr, flush=True)
+    except ImportError:
+        pass  # all deps not installed, try visible
+
+    # Fallback: visible marks + metadata only (no GPU needed).
     try:
         from remove_ai_watermarks.api import remove_visible
+        try:
+            remove_visible(str(file_path), str(file_path))
+        except Exception as exc:
+            print(f"[去水印] visible 模式失败，保留原图：{exc}", file=sys.stderr, flush=True)
     except ImportError:
-        return  # tool not installed, skip silently
-
-    try:
-        remove_visible(str(file_path), str(file_path))
-    except Exception as exc:
-        print(f"[去水印] 跳过 {file_path.name}：{exc}", file=sys.stderr, flush=True)
+        pass  # tool not installed at all, skip silently
 
 
 def _persist_base64_image(result: dict[str, Any], current_user: User) -> tuple[str, str]:
