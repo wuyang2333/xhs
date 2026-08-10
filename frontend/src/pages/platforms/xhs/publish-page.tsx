@@ -355,13 +355,15 @@ export function XhsPublishPage() {
     setMessage(null);
     try {
       const saved = await saveAndroidJob();
-      const updated = await prepareAndroidPublish(saved.id);
-      setJobs((current) => current.map((job) => (job.id === updated.job.id ? updated.job : job)));
-      applyJob(updated.job);
-      setMessage(`图片已传到手机并打开小红书。请在手机上确认图片，然后点「写入文案」。`);
+      const updated = await publishAndroidDirect(saved.id);
+      setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
+      applyJob(updated);
+      setMessage(`发布任务 #${updated.id} 已通过安卓手机发布。`);
     } catch (err: unknown) {
       const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(d || "传图到手机失败。请保持手机解锁、USB 已连接。");
+      const code = (err as { response?: { status?: number } })?.response?.status;
+      if (code === 409) setMessage(d || "已点击手机发布按钮，请检查手机后确认结果，勿重复发布。");
+      else setError(d || "安卓手机发布失败。请保持手机解锁、USB 已连接，并停留在正常小红书账号中。");
       try {
         const refreshed = await fetchPublishJob(selectedJob.id);
         setJobs((current) => current.map((job) => (job.id === refreshed.id ? refreshed : job)));
