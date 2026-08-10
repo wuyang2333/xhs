@@ -207,6 +207,26 @@ def _register_ai_media_asset(
         pass
 
 
+def _remove_ai_watermark(file_path: Path) -> None:
+    """Remove visible AI watermarks and strip AI metadata from a generated image.
+
+    Uses remove-ai-watermarks[visible] — no GPU needed. Failures are logged
+    but never block the image from being returned; the user gets the original
+    with watermark if removal fails.
+    """
+    import sys
+
+    try:
+        from remove_ai_watermarks.api import remove_visible
+    except ImportError:
+        return  # tool not installed, skip silently
+
+    try:
+        remove_visible(str(file_path), str(file_path))
+    except Exception as exc:
+        print(f"[去水印] 跳过 {file_path.name}：{exc}", file=sys.stderr, flush=True)
+
+
 def _persist_base64_image(result: dict[str, Any], current_user: User) -> tuple[str, str]:
     image_ref = result.get("url") or ""
     if not isinstance(image_ref, str) or not image_ref.startswith("data:image/"):
@@ -229,7 +249,11 @@ def _persist_base64_image(result: dict[str, Any], current_user: User) -> tuple[s
         file_name = f"xhs-image-u{current_user.id}-{uuid4().hex}.{extension}"
         media_dir = Path(get_settings().storage_dir) / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
-        (media_dir / file_name).write_bytes(base64.b64decode(encoded))
+        saved_path = media_dir / file_name
+        saved_path.write_bytes(base64.b64decode(encoded))
+        # 去除 AI 暗水印（可见标记 + 元数据）。三处生图入口都走这里：
+        # 草稿工坊、图片工坊、自动运营。失败不阻断，原图保留。
+        _remove_ai_watermark(saved_path)
         return f"/api/files/media/{file_name}", file_name
     except Exception as exc:
         raise ValueError(f"图片已生成，但 Base64 文件保存失败: {exc}") from exc

@@ -25,3 +25,5 @@ Pillow>=9.2
 pyyaml
 
 curl_cffi
+
+remove-ai-watermarks[visible]
