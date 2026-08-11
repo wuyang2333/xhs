@@ -44,7 +44,8 @@ router = APIRouter(prefix="/auto-tasks", tags=["auto-tasks"])
 class AutoTaskCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     keywords: list[str] = Field(min_length=1)
-    pc_account_id: int
+    # 采集账号可选：不填就跳过抓取，直接按关键词让 AI 生成。
+    pc_account_id: Optional[int] = None
     creator_account_id: int
     ai_instruction: str = Field(default="", max_length=2000)
     schedule_type: str = Field(default="manual", pattern="^(manual|daily|weekly|interval)$")
@@ -110,14 +111,18 @@ def _resolve_proposed_account(
     role: str,
     role_label: str,
     warnings: list[str],
+    optional: bool = False,
 ) -> tuple[Optional[int], Optional[dict[str, Any]]]:
     """把 AI 给的账号 id 复核一遍归属，通不过就留空 + 告警。
 
     发错账号是不可逆后果（笔记直接进别人主页），所以这里绝不放行「看起来像 id 的东西」：
     非整数、不存在、不属于当前用户、平台或子类型不对，全部当作未匹配处理。
+
+    optional=True 时留空不告警——采集账号本就可以不填（不填即跳过抓取）。
     """
     if raw_value is None or isinstance(raw_value, bool):
-        warnings.append(f"AI 未能确定{role_label}，请手动选择。")
+        if not optional:
+            warnings.append(f"AI 未能确定{role_label}，请手动选择。")
         return None, None
     try:
         account_id = int(raw_value)
@@ -239,6 +244,7 @@ def _build_auto_task_proposal(
         role="pc_account_id",
         role_label="采集账号",
         warnings=warnings,
+        optional=True,
     )
     if pc_match:
         matched_accounts.append(pc_match)
@@ -478,9 +484,11 @@ def create_auto_task(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    source_account = db.get(PlatformAccount, payload.pc_account_id)
-    if source_account is None or source_account.user_id != current_user.id or source_account.platform != "xhs" or source_account.sub_type not in {"pc", "android"}:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="XHS source account not found")
+    # 采集账号可以不填；填了就必须是自己的、可用于抓取的 XHS 账号。
+    if payload.pc_account_id is not None:
+        source_account = db.get(PlatformAccount, payload.pc_account_id)
+        if source_account is None or source_account.user_id != current_user.id or source_account.platform != "xhs" or source_account.sub_type not in {"pc", "android"}:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="XHS source account not found")
     publish_account = db.get(PlatformAccount, payload.creator_account_id)
     if publish_account is None or publish_account.user_id != current_user.id or publish_account.platform != "xhs" or publish_account.sub_type not in {"creator", "android"}:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="XHS publish account not found")
@@ -573,7 +581,8 @@ def run_auto_task(
     # Pure-AI Android tasks do not need a PC account or XHS search cookies. They
     # generate an original illustrated draft and leave a pending mobile publish
     # job for review.
-    if (
+    # 没填采集账号 => 纯生成；填了安卓号 => 也走纯生成（安卓号不能抓取）。
+    if auto_task.pc_account_id is None or (
         source_account is not None
         and source_account.user_id == current_user.id
         and source_account.platform == "xhs"

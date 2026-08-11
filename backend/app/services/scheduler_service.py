@@ -443,11 +443,13 @@ def _execute_auto_task_background(db: Session, task: AutoTask) -> None:
     from backend.app.api.platforms.xhs.pc import _normalize_search_item
     from backend.app.services.ai_service import OpenAICompatibleTextClient, normalize_xhs_title
 
-    # Get PC cookies
-    account = db.get(PlatformAccount, task.pc_account_id)
-    if not account:
-        return
-    if account.sub_type != "pc":
+    # 采集账号可以不填：不填就跳过抓取，直接按关键词让 AI 生成。
+    # 此前 pc_account_id 是必填，被当成模式开关用（填 PC 号才抓取），
+    # 且指向空账号时会静默 return，任务看起来跑了却什么都没做。
+    account = db.get(PlatformAccount, task.pc_account_id) if task.pc_account_id else None
+    if task.pc_account_id and not account:
+        raise RuntimeError(f"采集账号 {task.pc_account_id} 不存在，任务已中止")
+    if account is None or account.sub_type != "pc":
         from backend.app.api.ai import _persist_base64_image
         from backend.app.models import AiGeneratedAsset, DraftAsset
         from backend.app.services.ai_service import OpenAICompatibleImageClient

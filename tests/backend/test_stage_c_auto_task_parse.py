@@ -343,7 +343,11 @@ def test_parse_description_caps_keywords_at_ten(parse_env):
     assert any("10" in warning for warning in payload["warnings"])
 
 
-def test_parse_description_warns_when_account_missing(parse_env):
+def test_parse_description_warns_when_publish_account_missing(parse_env):
+    """发布账号缺失必须告警——发错账号不可逆。
+
+    采集账号缺失**不**告警：它是可选的，不填即跳过抓取、纯 AI 生成。
+    """
     response, _ = _parse(
         parse_env["headers"],
         {"name": "护腰种草", "keywords": ["护腰"], "schedule_type": "manual"},
@@ -352,7 +356,11 @@ def test_parse_description_warns_when_account_missing(parse_env):
     payload = response.json()
     assert payload["proposal"]["creator_account_id"] is None
     assert any("发布账号" in warning for warning in payload["warnings"])
-    assert any("采集账号" in warning for warning in payload["warnings"])
+    # 采集账号可选，留空不该告警，否则用户会以为漏填了东西
+    assert not any("采集账号" in warning for warning in payload["warnings"]), (
+        f"采集账号是可选字段，不应告警。实际告警：{payload['warnings']}"
+    )
+    assert payload["proposal"]["pc_account_id"] is None
 
 
 def test_parse_description_offers_auto_ops_prompts_as_instruction_candidates(parse_env):
@@ -489,6 +497,46 @@ def test_parse_description_rejects_out_of_range_interval_hours(parse_env):
     payload = response.json()
     assert payload["proposal"]["schedule_interval_hours"] is None
     assert any("5000" in warning for warning in payload["warnings"])
+
+
+def test_create_auto_task_without_collection_account(parse_env):
+    """不填采集账号也能建任务——纯生成场景不需要抓取。
+
+    此前 pc_account_id 是 NOT NULL 且表单必填，用户即使不抓取也得随便选个账号。
+    """
+    created = client.post(
+        "/api/auto-tasks",
+        json={
+            "name": "纯生成护腰笔记",
+            "keywords": ["护腰"],
+            "creator_account_id": parse_env["creator_account_id"],
+            "ai_instruction": "生成10篇护腰主题小红书笔记",
+            "schedule_type": "manual",
+        },
+        headers=parse_env["headers"],
+    )
+
+    assert created.status_code == 200, created.text
+    body = created.json()
+    assert body["pc_account_id"] is None, "未提供采集账号时应存为 null"
+    assert body["creator_account_id"] == parse_env["creator_account_id"]
+
+
+def test_create_auto_task_rejects_foreign_collection_account(parse_env):
+    """采集账号可选，但填了就必须是自己的——不能因为「可选」就放松归属校验。"""
+    created = client.post(
+        "/api/auto-tasks",
+        json={
+            "name": "越权采集",
+            "keywords": ["护腰"],
+            "pc_account_id": 999999,
+            "creator_account_id": parse_env["creator_account_id"],
+            "schedule_type": "manual",
+        },
+        headers=parse_env["headers"],
+    )
+
+    assert created.status_code == 404, f"不存在的采集账号应被拒，实际 {created.status_code}"
 
 
 def test_parse_description_proposal_fields_are_accepted_by_create_endpoint(parse_env):

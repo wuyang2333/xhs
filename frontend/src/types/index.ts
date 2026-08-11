@@ -767,7 +767,8 @@ export type AutoTask = {
   user_id: number;
   name: string;
   keywords: string[];
-  pc_account_id: number;
+  /** 采集账号可选，不填表示跳过抓取、纯 AI 生成 */
+  pc_account_id: number | null;
   creator_account_id: number;
   ai_instruction: string;
   status: "active" | "paused" | "completed" | string;
@@ -784,7 +785,8 @@ export type AutoTask = {
 export type AutoTaskCreatePayload = {
   name: string;
   keywords: string[];
-  pc_account_id: number;
+  /** 采集账号可选，不填表示跳过抓取、纯 AI 生成 */
+  pc_account_id?: number | null;
   creator_account_id: number;
   ai_instruction?: string;
   schedule_type?: "manual" | "daily" | "weekly" | "interval";

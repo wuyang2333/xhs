@@ -17,7 +17,8 @@ class AutoTask(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(128))
     keywords: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-    pc_account_id: Mapped[int] = mapped_column(ForeignKey("platform_accounts.id"))
+    # 采集账号可选：不填表示跳过抓取，直接按关键词让 AI 生成。
+    pc_account_id: Mapped[Optional[int]] = mapped_column(ForeignKey("platform_accounts.id"), nullable=True)
     creator_account_id: Mapped[int] = mapped_column(ForeignKey("platform_accounts.id"))
     ai_instruction: Mapped[str] = mapped_column(Text, default="")
     schedule_type: Mapped[str] = mapped_column(String(32), default="manual")

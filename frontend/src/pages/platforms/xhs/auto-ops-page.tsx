@@ -195,8 +195,9 @@ export function AutoOpsPage() {
 
   async function handleCreate() {
     const keywords = parseKeywords(createKeywords);
-    if (!createName.trim() || keywords.length === 0 || !createPcAccountId || !createCreatorAccountId) {
-      setError("请填写任务名称、至少一个关键词，并选择 PC 与发布账号。");
+    // 采集账号非必填：不选就跳过抓取，直接按关键词让 AI 生成。
+    if (!createName.trim() || keywords.length === 0 || !createCreatorAccountId) {
+      setError("请填写任务名称、至少一个关键词，并选择发布账号。");
       return;
     }
     // 定时任务必须有明确时间。留空提交会被后端静默当成 09:00——那正是「悄悄用猜测值」。
@@ -691,11 +692,14 @@ export function AutoOpsPage() {
             </Row>
             <Row gutter={16}>
               <Col xs={24} md={12}>
-                <Form.Item label="PC 账号（用于抓取）" required>
+                <Form.Item
+                  label="采集账号（可选）"
+                  extra="不选则跳过抓取，直接按关键词让 AI 生成内容"
+                >
                   <Select
-                    placeholder="选择 PC 账号"
+                    placeholder="不选 = 不抓取，纯 AI 生成"
                     value={createPcAccountId}
-                    onChange={(v) => setCreatePcAccountId(v)}
+                    onChange={(v) => setCreatePcAccountId(v ?? null)}
                     options={pcAccounts.map((a) => ({
                       value: a.id,
                       label: `${a.nickname || "PC"} (#${a.id})`,
