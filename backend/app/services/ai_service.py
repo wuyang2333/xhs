@@ -445,6 +445,10 @@ class OpenAICompatibleImageClient:
             "n": 1,
             "size": size or "1024x1024",
         }
+        # 火山 ARK / 豆包系默认 watermark=true，会在右下角打角标。
+        # 此前只在带参考图时才发 watermark=False，纯文生图走默认值 => 出图带水印。
+        # 对不认识这个字段的服务商（OpenAI 等）是多余参数，不影响。
+        body["watermark"] = False
         if reference_images:
             resolved = [self._resolve_image_ref(url) for url in reference_images]
             if len(resolved) == 1:
@@ -452,7 +456,6 @@ class OpenAICompatibleImageClient:
             else:
                 body["image"] = resolved
                 body["sequential_image_generation"] = "disabled"
-            body["watermark"] = False
         response: requests.Response | None = None
         try:
             for attempt in range(3):
