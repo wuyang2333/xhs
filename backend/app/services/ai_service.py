@@ -403,6 +403,41 @@ class OpenAICompatibleTextClient:
         )
 
 
+def _bump_size_for_minimum(current_size: str, error_detail: str) -> str | None:
+    """Return a larger WxH that satisfies a provider's minimum-pixel requirement.
+
+    Seedream 4.5 / 5.0 reject anything under 3686400 pixels (1920x1920) while the
+    historical default is 1024x1024. The error message carries the required count,
+    so scale the current aspect ratio up to clear it instead of hardcoding a size
+    per model name (which would rot on every new release).
+
+    Returns None when the error is unrelated to size or the current size is unparseable.
+    """
+    import math
+    import re
+
+    if "size" not in error_detail.lower():
+        return None
+    match = re.search(r"at least (\d+) pixels", error_detail)
+    if not match:
+        return None
+    required = int(match.group(1))
+
+    dims = re.fullmatch(r"\s*(\d+)\s*[xX]\s*(\d+)\s*", current_size or "")
+    width, height = (int(dims.group(1)), int(dims.group(2))) if dims else (1024, 1024)
+    if width <= 0 or height <= 0:
+        width = height = 1024
+
+    scale = math.sqrt(required / (width * height))
+    # 多数服务商要求边长是 64 的倍数，向上取整以免又被拒。
+    new_w = math.ceil(width * scale / 64) * 64
+    new_h = math.ceil(height * scale / 64) * 64
+    if new_w * new_h < required:  # rounding landed short
+        new_w += 64
+        new_h += 64
+    return f"{new_w}x{new_h}"
+
+
 class OpenAICompatibleImageClient:
     def _validate(self, *, model_config: ModelConfig, api_key: str) -> None:
         if not model_config.base_url:
@@ -436,6 +471,7 @@ class OpenAICompatibleImageClient:
         prompt: str,
         reference_images: list[str] | None = None,
         size: str = "1024x1024",
+        _retried_size: bool = False,
     ) -> dict[str, Any]:
         self._validate(model_config=model_config, api_key=api_key)
         endpoint = f"{model_config.base_url.rstrip('/')}/images/generations"
@@ -483,10 +519,25 @@ class OpenAICompatibleImageClient:
         except requests.HTTPError as exc:
             detail = ""
             try:
-                error_payload = _load_json_response(exc.response) if exc.response else {}
+                # 必须用 is not None：requests 的 Response.__bool__ 返回 self.ok，
+                # 4xx/5xx 响应是 falsy 的，写 `if exc.response` 会永远跳过解析，
+                # 导致服务商的真实报错拿不到，只能看到裸 HTTP 错误。
+                error_payload = _load_json_response(exc.response) if exc.response is not None else {}
                 detail = error_payload.get("error", {}).get("message", "") if isinstance(error_payload, dict) else ""
             except Exception:
                 pass
+            # Seedream 4.5 / 5.0 要求最小像素数（如 3686400 = 1920x1920），
+            # 而历史默认是 1024x1024。从错误信息里解析出要求值，按原比例放大重试一次。
+            bumped = _bump_size_for_minimum(body.get("size", ""), detail)
+            if bumped and not _retried_size:
+                return self.generate_image(
+                    model_config=model_config,
+                    api_key=api_key,
+                    prompt=prompt,
+                    reference_images=reference_images,
+                    size=bumped,
+                    _retried_size=True,
+                )
             raise ValueError(f"图片生成失败: {detail or exc}") from exc
         except requests.exceptions.ReadTimeout as exc:
             raise ValueError("图片生成超时；服务可能仍在处理，请稍后查看图片库后再重试") from exc
