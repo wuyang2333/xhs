@@ -325,8 +325,9 @@ export function AutoOpsPage() {
       setTasks((prev) => prev.map((t) => (t.id === updated.id ? updated : t)));
       setEditTask(null);
       setMessage(`任务"${updated.name}"已更新。`);
-    } catch {
-      setError("更新任务失败。");
+    } catch (err: unknown) {
+      const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(d || "更新任务失败。");
     } finally {
       setIsSaving(false);
     }
