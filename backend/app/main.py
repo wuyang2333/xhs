@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,13 +12,74 @@ from backend.app.api import accounts, ai, assets, auth, auto_tasks, backups, dra
 from backend.app.api.platforms import registry
 from backend.app.api.platforms.xhs import analytics, crawl, creator, monitoring, pc
 from backend.app.core.config import get_settings
-from backend.app.core.database import init_db
+from backend.app.core.database import init_db, SessionLocal
 from backend.app.services.scheduler_service import run_due_auto_tasks, shutdown_due_publish_scheduler, start_due_publish_scheduler
+
+
+def _sync_model_configs() -> None:
+    """启动时从 config/model_configs.json 导入缺失的模型配置。
+
+    两台机器的数据库独立，用户在 Mac 上配的模型 Windows 看不到。
+    把配置导出到 git 里的 JSON，启动时自动导入——按 name 去重，已存在的不覆盖。
+    API Key 是加密的，两台机器用同一个 secret_key（config/default.yaml）所以密文通用。
+    """
+    config_path = Path("config/model_configs.json")
+    if not config_path.is_file():
+        return
+    try:
+        configs = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    from backend.app.models import ModelConfig
+
+    db = SessionLocal()
+    try:
+        imported = 0
+        for cfg in configs:
+            existing = db.query(ModelConfig).filter(
+                ModelConfig.name == cfg["name"],
+                ModelConfig.user_id == 1,
+            ).first()
+            if existing:
+                # 已存在的更新密钥和默认标记（用户可能在另一台机器上改过）
+                existing.encrypted_api_key = cfg["encrypted_api_key"]
+                if cfg.get("is_default"):
+                    db.query(ModelConfig).filter(
+                        ModelConfig.user_id == 1,
+                        ModelConfig.model_type == cfg["model_type"],
+                    ).update({ModelConfig.is_default: False})
+                    existing.is_default = True
+                continue
+            row = ModelConfig(
+                user_id=1,
+                name=cfg["name"],
+                model_type=cfg["model_type"],
+                provider=cfg.get("provider", ""),
+                model_name=cfg.get("model_name", ""),
+                base_url=cfg.get("base_url", ""),
+                encrypted_api_key=cfg.get("encrypted_api_key", ""),
+                is_default=cfg.get("is_default", False),
+            )
+            if row.is_default:
+                db.query(ModelConfig).filter(
+                    ModelConfig.user_id == 1,
+                    ModelConfig.model_type == cfg["model_type"],
+                ).update({ModelConfig.is_default: False})
+            db.add(row)
+            imported += 1
+        db.commit()
+        if imported:
+            print(f"[模型同步] 从 config/model_configs.json 导入了 {imported} 条新配置")
+    except Exception as exc:
+        print(f"[模型同步] 失败（不阻断启动）: {exc}")
+    finally:
+        db.close()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    _sync_model_configs()
     settings = get_settings()
     scheduler = None
     if settings.scheduler_enabled:
