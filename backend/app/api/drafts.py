@@ -354,6 +354,7 @@ def delete_draft(
     draft = db.get(AiDraft, draft_id)
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
+    # 清理所有外键引用，否则 SQLite 外键约束阻止删除
     for asset in db.scalars(select(DraftAsset).where(DraftAsset.draft_id == draft.id)).all():
         db.execute(
             PublishAsset.__table__.update()
@@ -361,6 +362,17 @@ def delete_draft(
             .values(source_draft_asset_id=None)
         )
         db.delete(asset)
+    # ai_generated_assets.draft_id 是可空的，置 NULL 即可
+    db.execute(
+        AiGeneratedAsset.__table__.update()
+        .where(AiGeneratedAsset.draft_id == draft.id)
+        .values(draft_id=None)
+    )
+    # operation_plans.draft_id 同理
+    from sqlalchemy import text
+    db.execute(text("UPDATE operation_plans SET draft_id = NULL WHERE draft_id = :d"), {"d": draft.id})
+    # publish_jobs.source_draft_id 同理
+    db.execute(text("UPDATE publish_jobs SET source_draft_id = NULL WHERE source_draft_id = :d"), {"d": draft.id})
     db.delete(draft)
     db.commit()
     return {"id": draft_id, "status": "deleted"}

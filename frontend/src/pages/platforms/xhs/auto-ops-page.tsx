@@ -767,8 +767,11 @@ export function AutoOpsPage() {
             )}
 
             {createScheduleType === "interval" && (
-              <Form.Item label="间隔小时（0.5 = 30 分钟）">
-                <InputNumber min={0.5} step={0.5} max={168} value={createIntervalHours} onChange={(v) => setCreateIntervalHours(v ?? 24)} />
+              <Form.Item label="间隔时间">
+                <Space>
+                  <InputNumber min={0.5} step={0.5} max={168} value={createIntervalHours} onChange={(v) => setCreateIntervalHours(v ?? 24)} style={{ width: 100 }} />
+                  <Text type="secondary">小时（0.5 = 30 分钟，1 = 1 小时，24 = 1 天）</Text>
+                </Space>
               </Form.Item>
             )}
 
@@ -861,8 +864,11 @@ export function AutoOpsPage() {
           )}
 
           {editScheduleType === "interval" && (
-            <Form.Item label="间隔小时（0.5 = 30 分钟）">
-              <InputNumber min={0.5} step={0.5} max={168} value={editIntervalHours} onChange={(v) => setEditIntervalHours(v ?? 24)} />
+            <Form.Item label="间隔时间">
+              <Space>
+                <InputNumber min={0.5} step={0.5} max={168} value={editIntervalHours} onChange={(v) => setEditIntervalHours(v ?? 24)} style={{ width: 100 }} />
+                <Text type="secondary">小时（0.5 = 30 分钟，1 = 1 小时，24 = 1 天）</Text>
+              </Space>
             </Form.Item>
           )}
         </Form>
