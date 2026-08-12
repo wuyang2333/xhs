@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 from typing import Any, Protocol
 
@@ -9,6 +10,33 @@ import requests
 from backend.app.models import ModelConfig
 
 XHS_TITLE_MAX_LENGTH = 20
+
+
+def _proxy_kwargs() -> dict[str, Any]:
+    """Read HTTP/HTTPS proxy from env so Python can reach AI APIs behind a proxy.
+
+    Windows 系统代理只对浏览器生效，Python 的 requests 不会自动读它。
+    从 HTTP_PROXY / HTTPS_PROXY 环境变量取——这两个是 requests 唯一自动读的，
+    但用户通常只在系统设置里配了，没设环境变量，所以这里兜底从 7897 取。
+    """
+    proxies: dict[str, str] = {}
+    for scheme in ("http", "https"):
+        env_val = os.environ.get(f"{scheme.upper()}_PROXY") or os.environ.get(f"{scheme}_proxy")
+        if env_val:
+            proxies[scheme] = env_val
+    if not proxies:
+        # 常见本地代理端口，按顺序探一个能连上的
+        import socket
+        for port in (7897, 7890, 10809, 1080):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.3)
+                    s.connect(("127.0.0.1", port))
+                proxies = {"http": f"http://127.0.0.1:{port}", "https": f"http://127.0.0.1:{port}"}
+                break
+            except OSError:
+                continue
+    return {"proxies": proxies} if proxies else {}
 
 
 def normalize_xhs_title(value: str, fallback: str = "") -> str:
@@ -209,6 +237,7 @@ class OpenAICompatibleTextClient:
                 "temperature": temperature,
             },
             timeout=timeout,
+            **_proxy_kwargs(),
         )
         response.raise_for_status()
         payload = _load_json_response(response)
@@ -507,6 +536,7 @@ class OpenAICompatibleImageClient:
                         },
                         json=body,
                         timeout=(20, 180),
+                        **_proxy_kwargs(),
                     )
                     break
                 except (requests.exceptions.SSLError, requests.exceptions.ConnectionError):
@@ -604,6 +634,7 @@ class OpenAICompatibleImageClient:
                 ],
             },
             timeout=120,
+            **_proxy_kwargs(),
         )
         response.raise_for_status()
         payload = _load_json_response(response)
