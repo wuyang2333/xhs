@@ -1,5 +1,9 @@
 #!/bin/bash
 cd "$(dirname "$0")"
+
+# 自动导出模型配置到 git
+./.venv-py312/bin/python scripts/export_model_configs.py
+
 git add -A
 git commit -m "更新 $(date +%Y-%m-%d-%H%M)"
 git push
