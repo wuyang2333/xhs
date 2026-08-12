@@ -51,7 +51,7 @@ class AutoTaskCreateRequest(BaseModel):
     schedule_type: str = Field(default="manual", pattern="^(manual|daily|weekly|interval)$")
     schedule_time: str = Field(default="09:00", max_length=5)
     schedule_days: str = Field(default="", max_length=64)
-    schedule_interval_hours: float = Field(default=24, ge=0.5, le=168)
+    schedule_interval_hours: float = Field(default=24, ge=0.0167, le=168)
 
 
 class AutoTaskParseDescriptionRequest(BaseModel):
@@ -75,7 +75,7 @@ class AutoTaskUpdateRequest(BaseModel):
     schedule_type: Optional[str] = Field(default=None, pattern="^(manual|daily|weekly|interval)$")
     schedule_time: Optional[str] = Field(default=None, max_length=5)
     schedule_days: Optional[str] = Field(default=None, max_length=64)
-    schedule_interval_hours: Optional[float] = Field(default=None, ge=0.5, le=168)
+    schedule_interval_hours: Optional[float] = Field(default=None, ge=0.0167, le=168)
 
 
 def _serialize_auto_task(task: AutoTask) -> dict[str, Any]:
