@@ -54,9 +54,12 @@ export function PromptPicker(props: {
     setIsLoading(true);
     void (async () => {
       try {
-        const { items } = await fetchPromptTemplates({
-          prompt_type: promptType, status: "active", account_id: accountId,
-        });
+        // auto_ops 不按类型筛——用户要求指令库里的所有指令都能选
+        const params: Parameters<typeof fetchPromptTemplates>[0] = { status: "active", account_id: accountId };
+        if (promptType !== "auto_ops") {
+          params.prompt_type = promptType;
+        }
+        const { items } = await fetchPromptTemplates(params);
         setTemplates(items);
         // 有默认指令时自动选上，省掉每次重选
         const preferred = readDefaultPrompt(module, promptType);
