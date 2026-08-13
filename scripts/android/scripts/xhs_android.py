@@ -303,6 +303,14 @@ def selectable_thumbnails(root: ET.Element) -> list[ET.Element]:
 def open_dedicated_album(serial: str) -> ET.Element:
     """Open CodexXHS using semantic controls, including newer bottom sheets."""
     root = dump_ui(serial)
+
+    # 新版小红书点 + 号后先出底部菜单（相册/商品/拍视频等），要选「相册」才进选图页面。
+    album_entry = find_node(root, texts=("相册",))
+    if album_entry is not None:
+        tap_node(serial, album_entry)
+        time.sleep(1.5)
+        root = dump_ui(serial)
+
     choose_from_album = find_node(root, texts=("从相册选择", "从相册中选择"))
     if choose_from_album is not None:
         tap_node(serial, choose_from_album)
@@ -314,12 +322,16 @@ def open_dedicated_album(serial: str) -> ET.Element:
         tap_node(serial, photos_tab)
         time.sleep(0.8)
 
-    root = dump_ui(serial)
-    album_selector = find_node(root, resource_ids=("com.xingin.xhs:id/jo",))
-    if album_selector is None:
-        # Newer versions obfuscate resource IDs. The visible current-album
-        # label is still semantic and tapping its bounds opens the album list.
-        album_selector = find_node(root, texts=("全部", "最近", "CodexXHS"))
+    # 相册选择器可能要等页面加载完才出现，重试 3 次。
+    album_selector = None
+    for attempt in range(3):
+        root = dump_ui(serial)
+        album_selector = find_node(root, resource_ids=("com.xingin.xhs:id/jo",))
+        if album_selector is None:
+            album_selector = find_node(root, texts=("全部", "最近", "CodexXHS"))
+        if album_selector is not None:
+            break
+        time.sleep(1.5)
     if album_selector is None:
         raise SystemExit(
             "Cannot open the Xiaohongshu album selector; device calibration is required"
