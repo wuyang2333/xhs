@@ -18,7 +18,6 @@ import { XhsDiscoveryPage } from "../pages/platforms/xhs/discovery-page";
 import { XhsDraftsPage } from "../pages/platforms/xhs/rewrite-page";
 import { XhsKeywordsPage } from "../pages/platforms/xhs/keywords-page";
 import { XhsLibraryPage } from "../pages/platforms/xhs/library-page";
-import { XhsMonitoringPage } from "../pages/platforms/xhs/monitoring-page";
 import { XhsOperationsPage } from "../pages/platforms/xhs/operations-page";
 import { XhsLearningCenterPage } from "../pages/platforms/xhs/learning-center-page";
 import { XhsPromptCenterPage } from "../pages/platforms/xhs/prompt-center-page";

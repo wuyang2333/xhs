@@ -909,7 +909,6 @@ export function XhsImageStudioPage() {
           ]}
         />
       </Modal>
-      {composer.node}
     </div>
   );
 }

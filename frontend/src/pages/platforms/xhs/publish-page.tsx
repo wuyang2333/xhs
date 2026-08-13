@@ -43,8 +43,6 @@ import { PageHeader } from "../../../components/layout/app-shell";
 import {
   addPublishAsset,
   confirmAndroidPublish,
-  fillAndroidPublish,
-  prepareAndroidPublish,
   deletePublishAsset,
   deletePublishJob,
   fetchAccounts,
@@ -374,24 +372,6 @@ export function XhsPublishPage() {
     }
   }
 
-  async function handleAndroidFill() {
-    if (!selectedJob) return;
-    setIsPublishing(true);
-    setError(null);
-    setMessage(null);
-    try {
-      const updated = await fillAndroidPublish(selectedJob.id);
-      setJobs((current) => current.map((job) => (job.id === updated.job.id ? updated.job : job)));
-      applyJob(updated.job);
-      setMessage(`文案已写入手机。请核对标题、正文和图片，然后在手机上点发布。发布后在网页点「确认手机已发布」。`);
-    } catch (err: unknown) {
-      const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      setError(d || "写入文案失败。请确认手机仍停留在小红书编辑页。");
-    } finally {
-      setIsPublishing(false);
-    }
-  }
-
   async function handleConfirmAndroidPublished() {
     if (!selectedJob) return;
     setIsPublishing(true);
@@ -550,15 +530,6 @@ export function XhsPublishPage() {
                       <Col>
                         <Space>
                           <Button icon={<SaveOutlined />} onClick={handleSave} loading={isSaving}>保存参数</Button>
-                          {isAndroidPublish && selectedJob.status === "awaiting_review" && (
-                            <Button
-                              icon={<EditOutlined />}
-                              onClick={handleAndroidFill}
-                              loading={isPublishing}
-                            >
-                              写入文案
-                            </Button>
-                          )}
                           {isAndroidPublish && ["failed", "publishing", "awaiting_review", "verification_required"].includes(selectedJob.status) && (
                             <Popconfirm
                               title="确认这篇笔记已在手机端发布成功？"

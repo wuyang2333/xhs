@@ -529,7 +529,12 @@ def update_auto_task(
     if payload.ai_instruction is not None:
         auto_task.ai_instruction = payload.ai_instruction
     if payload.status is not None:
+        # 从暂停恢复为 active 时，重新计算下次运行时间。
+        # 否则 next_run_at 可能是几周前的旧值，恢复瞬间立刻触发。
+        was_paused = auto_task.status == "paused"
         auto_task.status = payload.status
+        if payload.status == "active" and was_paused:
+            schedule_changed = True
 
     schedule_changed = False
     if payload.schedule_type is not None:

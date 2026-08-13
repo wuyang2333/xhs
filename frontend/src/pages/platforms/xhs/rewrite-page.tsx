@@ -30,7 +30,6 @@ import {
   Card,
   Checkbox,
   Col,
-  Collapse,
   Divider,
   Empty,
   Form,
@@ -231,7 +230,6 @@ export function XhsDraftsPage() {
   );
   const [titleOptions, setTitleOptions] = useState<string[]>([]);
   const [tagOptions, setTagOptions] = useState<string[]>([]);
-  const [systemPrompt, setSystemPrompt] = useState("你是小红书内容创作助手，擅长写吸引人的标题和正文。");
   const [sourceNote, setSourceNote] = useState<SavedNote | null>(null);
   const [sourceAssets, setSourceAssets] = useState<DraftAsset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -1177,24 +1175,6 @@ export function XhsDraftsPage() {
         <Col xs={24} lg={6}>
           <div style={{ position: "sticky", top: 16, maxHeight: "calc(100vh - 120px)", overflowY: "auto" }}>
           <Card title="AI 助手" size="small">
-            <Collapse
-              size="small"
-              style={{ marginBottom: 16 }}
-              items={[
-                {
-                  key: "system-prompt",
-                  label: "系统提示词 (可选)",
-                  children: (
-                    <TextArea
-                      rows={4}
-                      value={systemPrompt}
-                      onChange={(e) => setSystemPrompt(e.target.value)}
-                      placeholder="你是小红书内容创作助手，擅长写吸引人的标题和正文。"
-                    />
-                  ),
-                },
-              ]}
-            />
 
             <div style={{ marginBottom: 16 }}>
               <PromptPicker
@@ -1878,7 +1858,6 @@ export function XhsDraftsPage() {
       )}
 
       {activeMode === "rewrite" ? renderRewriteMode() : renderGenerateMode()}
-      {composer.node}
     </div>
   );
 }
