@@ -33,11 +33,15 @@ import {
 import { useEffect, useState } from "react";
 
 import { PageHeader } from "../../../components/layout/app-shell";
+import { PromptPicker } from "../../../components/prompts/prompt-picker";
+import type { PromptPickerValue } from "../../../components/prompts/prompt-picker";
+import { EMPTY_PROMPT_PICK } from "../../../components/prompts/prompt-picker";
 import {
   createAutoTask,
   deleteAutoTask,
   fetchAccounts,
   fetchAutoTasks,
+  fetchPromptTemplates,
   parseAutoTaskDescription,
   runAutoTask,
   updateAutoTask,
@@ -91,6 +95,7 @@ export function AutoOpsPage() {
   const [createPcAccountId, setCreatePcAccountId] = useState<number | null>(null);
   const [createCreatorAccountId, setCreateCreatorAccountId] = useState<number | null>(null);
   const [createInstruction, setCreateInstruction] = useState("");
+  const [createPromptPick, setCreatePromptPick] = useState<PromptPickerValue>(EMPTY_PROMPT_PICK);
   const [createScheduleType, setCreateScheduleType] = useState<string>("manual");
   const [createScheduleTime, setCreateScheduleTime] = useState<string>("09:00");
   const [createScheduleDays, setCreateScheduleDays] = useState<string>("");
@@ -110,6 +115,7 @@ export function AutoOpsPage() {
   const [editName, setEditName] = useState("");
   const [editKeywords, setEditKeywords] = useState("");
   const [editInstruction, setEditInstruction] = useState("");
+  const [editPromptPick, setEditPromptPick] = useState<PromptPickerValue>(EMPTY_PROMPT_PICK);
   const [editScheduleType, setEditScheduleType] = useState("manual");
   const [editScheduleTime, setEditScheduleTime] = useState("09:00");
   const [editScheduleDays, setEditScheduleDays] = useState("");
@@ -724,6 +730,16 @@ export function AutoOpsPage() {
                 </Form.Item>
               </Col>
             </Row>
+            <PromptPicker
+              promptType="auto_ops"
+              module="auto_ops"
+              value={createPromptPick}
+              onChange={(v) => {
+                setCreatePromptPick(v);
+                if (v.content) setCreateInstruction(v.content);
+              }}
+              label="从指令库选择（可选，选中后自动填入下方）"
+            />
             <Form.Item label="AI 改写指令（可选）">
               <TextArea
                 placeholder="如：改写为种草风格，加入个人体验感受，适合 25-35 岁女性阅读"
@@ -822,6 +838,16 @@ export function AutoOpsPage() {
               rows={3}
             />
           </Form.Item>
+          <PromptPicker
+            promptType="auto_ops"
+            module="auto_ops"
+            value={editPromptPick}
+            onChange={(v) => {
+              setEditPromptPick(v);
+              if (v.content) setEditInstruction(v.content);
+            }}
+            label="从指令库选择（可选，选中后自动填入下方）"
+          />
           <Form.Item label="AI 改写指令">
             <TextArea
               value={editInstruction}

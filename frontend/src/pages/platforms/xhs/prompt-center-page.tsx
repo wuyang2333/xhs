@@ -47,6 +47,7 @@ export function XhsPromptCenterPage() {
   const [editing, setEditing] = useState<PromptTemplateItem | null>(null);
   const [editProductId, setEditProductId] = useState<number | undefined>();
   const [editSceneId, setEditSceneId] = useState<number | undefined>();
+  const [editContent, setEditContent] = useState("");
   const [editBusy, setEditBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
@@ -69,22 +70,24 @@ export function XhsPromptCenterPage() {
     setEditing(row);
     setEditProductId(row.product_id ?? undefined);
     setEditSceneId(row.scene_id ?? undefined);
+    setEditContent(row.content);
   }
 
   async function saveBindings() {
     if (!editing) return;
     setEditBusy(true);
     try {
-      // 只改绑定，不动正文，所以 current_version 与 is_official 都不受影响。
+      const contentChanged = editContent.trim() !== editing.content.trim();
       await updatePromptTemplate(editing.id, {
         name: editing.name, prompt_type: editing.prompt_type,
         platform_account_id: editing.platform_account_id ?? null,
         product_id: editProductId ?? null, scene_id: editSceneId ?? null,
-        scenes: editing.scenes, tags: editing.tags, content: editing.content,
+        scenes: editing.scenes, tags: editing.tags,
+        content: editContent,
         status: editing.status, priority: editing.priority,
-        change_note: "调整产品 / 场景绑定",
+        change_note: contentChanged ? "修改指令正文" : "调整产品 / 场景绑定",
       });
-      message.success("绑定已更新");
+      message.success(contentChanged ? "指令正文已更新，生成新版本" : "绑定已更新");
       setEditing(null);
       await load();
     } catch (error) { message.error(errorMessage(error)); }
@@ -259,16 +262,24 @@ export function XhsPromptCenterPage() {
     </Modal>
 
     <Modal
-      title={`调整绑定 · ${editing?.name ?? ""}`} open={editing !== null}
+      title={`编辑指令 · ${editing?.name ?? ""}`} open={editing !== null}
       onCancel={() => setEditing(null)} onOk={() => void saveBindings()}
-      confirmLoading={editBusy} okText="保存绑定" cancelText="取消"
+      confirmLoading={editBusy} okText="保存" cancelText="取消" width={640}
     >
       <Alert
         type="info" showIcon style={{ marginBottom: 16 }}
-        message="绑定产品或场景后，这条指令会出现在草稿工坊 / 图片工坊对应的层里"
-        description="只改绑定不动正文，版本号与官方标记都不变。产品 / 场景筛选会连通用指令一起返回。"
+        message="修改正文会生成新版本（版本号 +1）；只改绑定不动版本号"
       />
       <Space direction="vertical" style={{ width: "100%" }} size={12}>
+        <div>
+          <Text>指令正文</Text>
+          <Input.TextArea
+            value={editContent}
+            onChange={(e) => setEditContent(e.target.value)}
+            rows={8}
+            style={{ marginTop: 4 }}
+          />
+        </div>
         <div>
           <Text>绑定产品</Text>
           <Select

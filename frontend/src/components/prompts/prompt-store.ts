@@ -9,7 +9,7 @@
  * 收藏 / 最近使用 / 默认指令只落在 localStorage，不占后端字段。
  */
 
-export type PromptModule = "draft_studio" | "image_studio";
+export type PromptModule = "draft_studio" | "image_studio" | "auto_ops";
 
 const FAVORITES_KEY = "xhs.prompt.favorites";
 const RECENTS_KEY = "xhs.prompt.recents";
