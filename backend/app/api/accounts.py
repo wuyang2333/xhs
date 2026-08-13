@@ -356,10 +356,30 @@ def delete_account(
     account = db.get(PlatformAccount, account_id)
     if account is None or account.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
+    # 清理所有外键引用，否则 SQLite 外键约束阻止删除
     for cookie_version in db.scalars(
         select(AccountCookieVersion).where(AccountCookieVersion.platform_account_id == account.id)
     ).all():
         db.delete(cookie_version)
+    db.flush()
+    from sqlalchemy import text
+    for table, col in [
+        ("notes", "platform_account_id"),
+        ("monitoring_targets", "platform_account_id"),
+        ("publish_jobs", "platform_account_id"),
+        ("account_operation_profiles", "platform_account_id"),
+        ("operation_plans", "platform_account_id"),
+        ("learning_insights", "platform_account_id"),
+        ("operation_strategy_proposals", "platform_account_id"),
+        ("ai_drafts", "platform_account_id"),
+        ("prompt_templates", "platform_account_id"),
+        ("prompt_usages", "platform_account_id"),
+        ("auto_tasks", "creator_account_id"),
+    ]:
+        db.execute(text(f"UPDATE {table} SET {col} = NULL WHERE {col} = :aid"), {"aid": account.id})
+    # auto_tasks.pc_account_id 是可空的，直接置 NULL
+    db.execute(text("UPDATE auto_tasks SET pc_account_id = NULL WHERE pc_account_id = :aid"), {"aid": account.id})
+    db.flush()
     db.delete(account)
     db.commit()
     return {"id": account_id, "status": "deleted"}
