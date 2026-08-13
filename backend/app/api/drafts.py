@@ -13,7 +13,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
-from backend.app.models import AiDraft, DraftAsset, MediaAsset, Note, NoteAsset, PlatformAccount, PublishAsset, PublishJob, User
+from backend.app.models import AiDraft, AiGeneratedAsset, DraftAsset, MediaAsset, Note, NoteAsset, PlatformAccount, PublishAsset, PublishJob, User
 from backend.app.schemas.common import paginated
 
 router = APIRouter(prefix="/drafts", tags=["drafts"])
@@ -354,7 +354,9 @@ def delete_draft(
     draft = db.get(AiDraft, draft_id)
     if draft is None or draft.user_id != current_user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Draft not found")
-    # 清理所有外键引用，否则 SQLite 外键约束阻止删除
+    # 清理所有外键引用，否则 SQLite 外键约束阻止删除。
+    # 必须 flush() 强制按顺序执行——SQLAlchemy 默认会把 DELETE 排在 UPDATE 前面，
+    # 导致 draft_assets 还在的时候就去删 ai_drafts，外键约束直接拒绝。
     for asset in db.scalars(select(DraftAsset).where(DraftAsset.draft_id == draft.id)).all():
         db.execute(
             PublishAsset.__table__.update()
@@ -362,17 +364,20 @@ def delete_draft(
             .values(source_draft_asset_id=None)
         )
         db.delete(asset)
+    db.flush()
     # ai_generated_assets.draft_id 是可空的，置 NULL 即可
     db.execute(
         AiGeneratedAsset.__table__.update()
         .where(AiGeneratedAsset.draft_id == draft.id)
         .values(draft_id=None)
     )
+    db.flush()
     # operation_plans.draft_id 同理
     from sqlalchemy import text
     db.execute(text("UPDATE operation_plans SET draft_id = NULL WHERE draft_id = :d"), {"d": draft.id})
     # publish_jobs.source_draft_id 同理
     db.execute(text("UPDATE publish_jobs SET source_draft_id = NULL WHERE source_draft_id = :d"), {"d": draft.id})
+    db.flush()
     db.delete(draft)
     db.commit()
     return {"id": draft_id, "status": "deleted"}
