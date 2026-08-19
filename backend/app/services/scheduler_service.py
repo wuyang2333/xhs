@@ -454,7 +454,7 @@ def _execute_auto_task_background(db: Session, task: AutoTask) -> None:
         from backend.app.models import AiGeneratedAsset, DraftAsset
         from backend.app.services.ai_service import OpenAICompatibleImageClient
 
-        keyword = random.choice(task.keywords or ["护腰怎么选"])
+        keyword = random.choice(task.keywords or ["小红书好物推荐"])
         model_config, api_key = _get_text_model_for_user(db, task.user_id)
         if model_config is None:
             raise RuntimeError("Default text model not configured")
@@ -463,8 +463,8 @@ def _execute_auto_task_background(db: Session, task: AutoTask) -> None:
             model_config=model_config,
             api_key=api_key,
             topic=keyword,
-            reference="围绕护腰的选择、使用场景、透气性、支撑性和正确佩戴提供实用建议。",
-            instruction=task.ai_instruction,
+            reference="",
+            instruction=task.ai_instruction or f"围绕「{keyword}」写一篇小红书种草笔记",
         )
         draft = AiDraft(
             user_id=task.user_id,
@@ -485,8 +485,8 @@ def _execute_auto_task_background(db: Session, task: AutoTask) -> None:
             raise RuntimeError("Default image model not configured")
         image_key = decrypt_text(image_model.encrypted_api_key) if image_model.encrypted_api_key else ""
         prompt = (
-            f"为小红书笔记《{draft.title}》生成一张高质量竖版护腰主题配图，"
-            "真实生活场景，展示正确佩戴护腰，主体清晰，中文信息简洁准确，无品牌水印。"
+            f"为小红书笔记《{draft.title}》生成一张高质量竖版配图，"
+            "真实生活场景，主体清晰，中文信息简洁准确，无品牌水印。"
         )
         result = OpenAICompatibleImageClient().generate_image(
             model_config=image_model,
