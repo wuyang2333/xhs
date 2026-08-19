@@ -366,11 +366,6 @@ def delete_account(
     from sqlalchemy import text
     # 可空列：置 NULL
     for table, col in [
-        ("monitoring_targets", "platform_account_id"),
-        ("account_operation_profiles", "platform_account_id"),
-        ("operation_plans", "platform_account_id"),
-        ("learning_insights", "platform_account_id"),
-        ("operation_strategy_proposals", "platform_account_id"),
         ("ai_drafts", "platform_account_id"),
         ("prompt_templates", "platform_account_id"),
         ("prompt_usages", "platform_account_id"),
@@ -379,9 +374,15 @@ def delete_account(
     ]:
         db.execute(text(f"UPDATE {table} SET {col} = NULL WHERE {col} = :aid"), {"aid": account.id})
     db.flush()
-    # NOT NULL 列：只能删整行（notes.platform_account_id 和 auto_tasks.creator_account_id）
-    db.execute(text("DELETE FROM notes WHERE platform_account_id = :aid"), {"aid": account.id})
-    db.execute(text("DELETE FROM auto_tasks WHERE creator_account_id = :aid"), {"aid": account.id})
+    # NOT NULL 列：只能删整行
+    for table, col in [
+        ("notes", "platform_account_id"),
+        ("operation_strategy_proposals", "platform_account_id"),
+        ("account_operation_profiles", "platform_account_id"),
+        ("operation_plans", "platform_account_id"),
+        ("auto_tasks", "creator_account_id"),
+    ]:
+        db.execute(text(f"DELETE FROM {table} WHERE {col} = :aid"), {"aid": account.id})
     db.flush()
     db.delete(account)
     db.commit()
