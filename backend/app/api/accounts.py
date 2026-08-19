@@ -358,12 +358,15 @@ def delete_account(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found")
     # 清理所有外键引用，否则 SQLite 外键约束阻止删除。
     # 可空的列置 NULL，NOT NULL 的列必须删整行。
+    # 注意嵌套外键链：notes 被 ai_drafts.source_note_id 引用，
+    # 必须先清 ai_drafts.source_note_id 再删 notes。
     for cookie_version in db.scalars(
         select(AccountCookieVersion).where(AccountCookieVersion.platform_account_id == account.id)
     ).all():
         db.delete(cookie_version)
     db.flush()
     from sqlalchemy import text
+    aid = account.id
     # 可空列：置 NULL
     for table, col in [
         ("ai_drafts", "platform_account_id"),
@@ -372,7 +375,14 @@ def delete_account(
         ("auto_tasks", "pc_account_id"),
         ("publish_jobs", "platform_account_id"),
     ]:
-        db.execute(text(f"UPDATE {table} SET {col} = NULL WHERE {col} = :aid"), {"aid": account.id})
+        db.execute(text(f"UPDATE {table} SET {col} = NULL WHERE {col} = :aid"), {"aid": aid})
+    db.flush()
+    # 清嵌套外键：ai_drafts.source_note_id 引用 notes.id
+    db.execute(text("UPDATE ai_drafts SET source_note_id = NULL WHERE source_note_id IN (SELECT id FROM notes WHERE platform_account_id = :aid)"), {"aid": aid})
+    db.flush()
+    # 删 notes 的子表
+    for child in ["note_assets", "note_comments", "note_tags"]:
+        db.execute(text(f"DELETE FROM {child} WHERE note_id IN (SELECT id FROM notes WHERE platform_account_id = :aid)"), {"aid": aid})
     db.flush()
     # NOT NULL 列：只能删整行
     for table, col in [
@@ -382,7 +392,7 @@ def delete_account(
         ("operation_plans", "platform_account_id"),
         ("auto_tasks", "creator_account_id"),
     ]:
-        db.execute(text(f"DELETE FROM {table} WHERE {col} = :aid"), {"aid": account.id})
+        db.execute(text(f"DELETE FROM {table} WHERE {col} = :aid"), {"aid": aid})
     db.flush()
     db.delete(account)
     db.commit()
