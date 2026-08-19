@@ -112,8 +112,9 @@ export function XhsAccountsPage() {
         try {
           await deleteAccount(account.id);
           setAccounts((current) => current.filter((item) => item.id !== account.id));
-        } catch {
-          setError("账号删除失败。");
+        } catch (err: unknown) {
+          const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+          setError(d || "账号删除失败。");
         }
       },
     });
