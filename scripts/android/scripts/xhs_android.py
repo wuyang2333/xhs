@@ -401,7 +401,15 @@ def fill_title_body(serial: str, title: str, body: str) -> None:
     try:
         root = dump_ui(serial)
         title_point = find_text_field(root, "添加标题")
-        run_adb(serial, "shell", "ime", "enable", ADB_IME)
+        # 输入法可能没装或启用失败，尝试重装。
+        try:
+            run_adb(serial, "shell", "ime", "enable", ADB_IME)
+        except subprocess.CalledProcessError:
+            _log("[输入法] enable 失败，尝试重装 ADBKeyboard")
+            apk = Path(__file__).resolve().parent.parent / "assets" / "ADBKeyboard.apk"
+            run_adb(serial, "install", "-r", str(apk), capture=False)
+            run_adb(serial, "shell", "pm", "enable", "com.android.adbkeyboard", check=False)
+            run_adb(serial, "shell", "ime", "enable", ADB_IME)
         run_adb(serial, "shell", "ime", "set", ADB_IME)
         run_adb(serial, "shell", "input", "tap", *map(str, title_point))
         time.sleep(0.5)
