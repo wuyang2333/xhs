@@ -1,10 +1,10 @@
-import { CalendarOutlined, CheckOutlined, EditOutlined, ExperimentOutlined, PlusOutlined, SyncOutlined } from "@ant-design/icons";
-import { Alert, Button, Card, Col, DatePicker, Descriptions, Divider, Form, Input, InputNumber, List, message, Modal, Row, Select, Space, Switch, Table, Tag, Typography } from "antd";
+import { CalendarOutlined, CheckOutlined, DeleteOutlined, EditOutlined, ExperimentOutlined, PlusOutlined, SyncOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Col, DatePicker, Descriptions, Divider, Form, Input, InputNumber, List, message, Modal, Popconfirm, Row, Select, Space, Switch, Table, Tag, Typography } from "antd";
 import dayjs from "dayjs";
 import { useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { analyzeAccountStrategy, approveStrategyProposal, fetchAccounts, fetchOperationPlans, fetchOperationProfiles, fetchStrategyProposals, generateOperationPlans, rejectStrategyProposal, saveOperationProfile, syncAccountContent } from "../../../lib/api";
+import { analyzeAccountStrategy, approveStrategyProposal, clearAccountContent, fetchAccounts, fetchOperationPlans, fetchOperationProfiles, fetchStrategyProposals, generateOperationPlans, rejectStrategyProposal, saveOperationProfile, syncAccountContent } from "../../../lib/api";
 import type { OperationPlan, OperationProfile, PlatformAccount, StrategyProposal } from "../../../types";
 
 const { Title, Text } = Typography;
@@ -20,6 +20,7 @@ export function XhsOperationsPage() {
   const [editing, setEditing] = useState<PlatformAccount | null>(null);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState<Set<number>>(new Set());
+  const [clearing, setClearing] = useState<Set<number>>(new Set());
   const [proposals, setProposals] = useState<StrategyProposal[]>([]);
   const [reviewing, setReviewing] = useState<StrategyProposal | null>(null);
   const [analyzing, setAnalyzing] = useState<Set<number>>(new Set());
@@ -75,6 +76,15 @@ export function XhsOperationsPage() {
     } catch { message.error("账号内容同步失败"); }
     finally { setSyncing((current) => { const next = new Set(current); next.delete(account.id); return next; }); }
   }
+  async function clearContent(account: PlatformAccount) {
+    setClearing((current) => new Set(current).add(account.id));
+    try {
+      const result = await clearAccountContent(account.id);
+      message.success(`已清空内容库（${result.deleted} 篇），可重新「同步并分析」`);
+      await load();
+    } catch { message.error("清空内容库失败"); }
+    finally { setClearing((current) => { const next = new Set(current); next.delete(account.id); return next; }); }
+  }
   async function analyze(account: PlatformAccount) {
     setAnalyzing((current) => new Set(current).add(account.id));
     try {
@@ -117,7 +127,7 @@ export function XhsOperationsPage() {
       {accounts.filter((account) => !accountFilter || account.id === accountFilter).map((account) => {
         const profile = profiles.find((item) => item.platform_account_id === account.id);
         const pending = proposals.find((item) => item.platform_account_id === account.id);
-        return <Col xs={24} md={12} lg={8} key={account.id}><Card title={account.nickname || `账号 #${account.id}`} extra={<Space wrap><Button size="small" loading={syncing.has(account.id)} icon={<SyncOutlined />} onClick={() => void syncContent(account)}>同步并分析</Button><Button size="small" loading={analyzing.has(account.id)} icon={<ExperimentOutlined />} onClick={() => void analyze(account)}>重新分析</Button><Button size="small" icon={<EditOutlined />} onClick={() => openProfile(account)}>运营档案</Button></Space>}>
+        return <Col xs={24} md={12} lg={8} key={account.id}><Card title={account.nickname || `账号 #${account.id}`} extra={<Space wrap><Button size="small" loading={syncing.has(account.id)} icon={<SyncOutlined />} onClick={() => void syncContent(account)}>同步并分析</Button><Button size="small" loading={analyzing.has(account.id)} icon={<ExperimentOutlined />} onClick={() => void analyze(account)}>重新分析</Button><Button size="small" icon={<EditOutlined />} onClick={() => openProfile(account)}>运营档案</Button><Popconfirm title="清空该账号全部内容库笔记？" description="将删除该账号全部内容库笔记及评论/图片，不可恢复；清空后请重新「同步并分析」。" okText="确认清空" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => void clearContent(account)}><Button size="small" danger loading={clearing.has(account.id)} icon={<DeleteOutlined />}>清空内容库</Button></Popconfirm></Space>}>
           {pending ? <Alert type="info" showIcon message={`待确认策略 · ${pending.source_note_count}篇样本`} action={<Button size="small" type="link" onClick={() => setReviewing(pending)}>查看方案</Button>} style={{ marginBottom: 12 }} /> : null}
           {profile ? <Space direction="vertical"><Tag color={profile.status === "active" ? "green" : "default"}>{profile.status === "active" ? "规划中" : "已暂停"}</Tag><Text>{profile.positioning || "未填写账号定位"}</Text><Text type="secondary">每日 {profile.daily_post_count} 篇 · {profile.content_directions.join(" / ") || "未设内容方向"}</Text></Space> : <Button type="dashed" icon={<PlusOutlined />} onClick={() => openProfile(account)}>建立运营档案</Button>}
         </Card></Col>;

@@ -27,4 +27,9 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
             detail="User not found",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    # 子管理员：登录后以被共享的主账号身份操作，数据完全共享。
+    if user.shares_user_id is not None:
+        owner = db.get(User, user.shares_user_id)
+        if owner is not None:
+            return owner
     return user

@@ -18,7 +18,7 @@ router = APIRouter(prefix="/model-configs", tags=["model-configs"])
 
 class ModelConfigCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=128)
-    model_type: str = Field(pattern="^(text|image)$")
+    model_type: str = Field(pattern="^(text|image|vision)$")
     provider: str = Field(min_length=1, max_length=64)
     model_name: str = Field(default="", max_length=128)
     base_url: str = ""
@@ -76,7 +76,7 @@ def _clear_default_for_type(db: Session, user_id: int, model_type: str) -> None:
 
 @router.get("")
 def get_model_configs(
-    model_type: Optional[str] = Query(default=None, pattern="^(text|image)$"),
+    model_type: Optional[str] = Query(default=None, pattern="^(text|image|vision)$"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     current_user: User = Depends(get_current_user),
@@ -112,6 +112,85 @@ def create_model_config(
     db.commit()
     db.refresh(config)
     return _serialize_config(config)
+
+
+
+
+@router.get("/describe-options")
+def describe_options(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """图片描述可用的模型列表（文本类模型）+ 当前选中项。"""
+    text_configs = db.scalars(
+        select(ModelConfig).where(
+            ModelConfig.user_id == current_user.id,
+            ModelConfig.model_type == "text",
+        ).order_by(ModelConfig.id)
+    ).all()
+    vision = db.scalars(
+        select(ModelConfig).where(
+            ModelConfig.user_id == current_user.id,
+            ModelConfig.model_type == "vision",
+        ).order_by(ModelConfig.id)
+    ).first()
+    current_id = None
+    if vision is not None:
+        current_id = next(
+            (c.id for c in text_configs if c.model_name == vision.model_name and c.base_url == vision.base_url),
+            None,
+        )
+    if current_id is None:
+        current_id = next((c.id for c in text_configs if c.is_default), None)
+    return {
+        "items": [_serialize_config(c) for c in text_configs],
+        "current_id": current_id,
+    }
+
+
+class DescribeDefaultRequest(BaseModel):
+    model_config_id: int = Field(ge=1)
+
+
+@router.post("/describe-default")
+def set_describe_default(
+    payload: DescribeDefaultRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """把某个文本模型设为图片描述专用模型（生成一个 vision 配置引用它）。"""
+    source = _get_owned_config(db, current_user, payload.model_config_id)
+    if source.model_type != "text":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片描述只能选择文本类模型")
+    vision = db.scalars(
+        select(ModelConfig).where(
+            ModelConfig.user_id == current_user.id,
+            ModelConfig.model_type == "vision",
+        ).order_by(ModelConfig.id)
+    ).first()
+    if vision is None:
+        vision = ModelConfig(user_id=current_user.id, model_type="vision")
+        db.add(vision)
+    vision.name = f"{source.name}（图片描述）"
+    vision.provider = source.provider
+    vision.model_name = source.model_name
+    vision.base_url = source.base_url
+    vision.encrypted_api_key = source.encrypted_api_key
+    vision.is_default = True
+    for other in db.scalars(
+        select(ModelConfig).where(
+            ModelConfig.user_id == current_user.id,
+            ModelConfig.model_type == "vision",
+            ModelConfig.id != vision.id,
+        )
+    ).all():
+        other.is_default = False
+    db.commit()
+    db.refresh(vision)
+    return {
+        "id": vision.id,
+        "model_type": "vision",
+        "source_id": source.id,
+        "name": vision.name,
+        "is_default": True,
+    }
 
 
 @router.post("/{config_id}/test")

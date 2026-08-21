@@ -14,6 +14,7 @@ import type {
   AutoTaskUpdatePayload,
   AnalyticsCommentInsight,
   AccountContentItem,
+  AdminUser,
   AnalyticsHotTopic,
   AnalyticsReportPayload,
   AnalyticsReportResponse,
@@ -36,6 +37,7 @@ import type {
   Draft,
   DraftAsset,
   DescribeImagePayload,
+  DescribeOptionsResponse,
   GenerateNotePayload,
   GenerateCoverPayload,
   GenerateImagePayload,
@@ -409,6 +411,15 @@ export async function searchXhsNotes(payload: XhsSearchOptions): Promise<XhsNote
   return response.data;
 }
 
+export async function discoverUserNotes(payload: {
+  account_id: number;
+  user_url: string;
+  limit: number;
+}): Promise<{ total: number; limit: number; items: XhsSearchNote[] }> {
+  const response = await http.post("/xhs/pc/users/notes", payload);
+  return response.data;
+}
+
 export async function crawlXhsDataStream(
   payload: XhsDataCrawlPayload,
   onItem: (index: number, item: XhsDataCrawlItem) => void,
@@ -615,6 +626,38 @@ export async function createModelConfig(payload: ModelConfigPayload): Promise<Mo
 
 export async function setDefaultModelConfig(configId: number): Promise<ModelConfig> {
   const response = await http.post<ModelConfig>(`/model-configs/${configId}/set-default`);
+  return response.data;
+}
+
+
+
+export async function fetchAdminUsers(): Promise<{ items: AdminUser[] }> {
+  const response = await http.get<{ items: AdminUser[] }>("/admin/users");
+  return response.data;
+}
+
+export async function createSubAdmin(username: string, password: string): Promise<{ id: number; username: string; shares_user_id: number | null }> {
+  const response = await http.post("/admin/users/sub-admin", { username, password });
+  return response.data;
+}
+
+export async function resetUserPassword(userId: number, password: string): Promise<unknown> {
+  const response = await http.post(`/admin/users/${userId}/reset-password`, { password });
+  return response.data;
+}
+
+export async function setUserAdmin(userId: number, isAdmin: boolean): Promise<unknown> {
+  const response = await http.post(`/admin/users/${userId}/admin`, { is_admin: isAdmin });
+  return response.data;
+}
+
+export async function fetchDescribeOptions(): Promise<DescribeOptionsResponse> {
+  const response = await http.get<DescribeOptionsResponse>("/model-configs/describe-options");
+  return response.data;
+}
+
+export async function setDescribeDefault(modelConfigId: number): Promise<unknown> {
+  const response = await http.post("/model-configs/describe-default", { model_config_id: modelConfigId });
   return response.data;
 }
 
@@ -1063,6 +1106,10 @@ export async function createLearningInsight(payload: Omit<LearningInsight, "id" 
 
 export async function syncAccountContent(accountId: number): Promise<{ account_id: number; system_saved: number; remote_saved: number; total: number; remote_error: string; mobile_profile?: Record<string, unknown> | null; strategy_proposal?: StrategyProposal | null }> {
   return (await http.post(`/operations/accounts/${accountId}/sync-content`, undefined, { timeout: 900000 })).data;
+}
+
+export async function clearAccountContent(accountId: number): Promise<{ account_id: number; deleted: number }> {
+  return (await http.delete(`/operations/accounts/${accountId}/content`)).data;
 }
 
 export async function fetchAccountContent(accountId: number): Promise<AccountContentItem[]> {

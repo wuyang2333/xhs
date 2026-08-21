@@ -624,7 +624,7 @@ def run_auto_task(
             )
             .order_by(PublishJob.id.desc())
         ).first()
-        if publish_job is None:
+        if publish_job is None and "｜仅草稿" not in (auto_task.name or ""):
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail="AI draft generation did not create a publish job",
@@ -650,7 +650,7 @@ def run_auto_task(
                 "id": publish_job.id,
                 "status": publish_job.status,
                 "platform_account_id": publish_job.platform_account_id,
-            },
+            } if publish_job else None,
         }
 
     # Research-based tasks still require a PC account and cookies.

@@ -22,6 +22,7 @@ import {
   Modal,
   Pagination,
   Row,
+  Select,
   Space,
   Spin,
   Tabs,
@@ -41,13 +42,15 @@ import {
   deleteGeneratedImageAsset,
   deleteUserImage,
   describeImageWithAi,
+  fetchDescribeOptions,
   fetchGeneratedImageAssets,
   fetchUserImages,
   generateImageWithAi,
+  setDescribeDefault,
   uploadAssetFile,
 } from "../../../lib/api";
 import { formatShanghaiTime } from "../../../lib/time";
-import type { GeneratedImageAsset, UserImageFile } from "../../../types";
+import type { DescribeOptionsResponse, GeneratedImageAsset, ModelConfig, UserImageFile } from "../../../types";
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -88,6 +91,8 @@ export function XhsImageStudioPage() {
   const navigate = useNavigate();
   const [imagePrompt, setImagePrompt] = useState<PromptPickerValue>(EMPTY_PROMPT_PICK);
   const [describePrompt, setDescribePrompt] = useState<PromptPickerValue>(EMPTY_PROMPT_PICK);
+  const [describeOptions, setDescribeOptions] = useState<ModelConfig[]>([]);
+  const [describeModelId, setDescribeModelId] = useState<number | null>(null);
   const [aiPage, setAiPage] = useState(1);
   const [aiPageSize, setAiPageSize] = useState(20);
   const [aiTotal, setAiTotal] = useState(0);
@@ -150,6 +155,25 @@ export function XhsImageStudioPage() {
       setError("AI 图片生成失败，请确认已配置图片生成模型。");
     } finally {
       setIsGenerating(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchDescribeOptions()
+      .then((data: DescribeOptionsResponse) => {
+        setDescribeOptions(data.items);
+        setDescribeModelId(data.current_id);
+      })
+      .catch(() => {});
+  }, []);
+
+  async function handleDescribeModelChange(value: number) {
+    setDescribeModelId(value);
+    try {
+      await setDescribeDefault(value);
+      setMessage("图片描述模型已切换。");
+    } catch {
+      setError("切换图片描述模型失败。");
     }
   }
 
@@ -452,7 +476,7 @@ export function XhsImageStudioPage() {
             }
             extra={
               <Text type="secondary" style={{ fontSize: 11 }}>
-                需配置多模态模型（如 GPT-4o）
+                可单独选择描述模型
               </Text>
             }
           >
@@ -478,6 +502,17 @@ export function XhsImageStudioPage() {
               onChange={setDescribePrompt}
               disabled={isDescribing}
             />
+            <Space direction="vertical" size={4} style={{ width: "100%", marginBottom: 12 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>描述模型</Text>
+              <Select
+                value={describeModelId ?? undefined}
+                onChange={(value) => void handleDescribeModelChange(value)}
+                options={describeOptions.map((m) => ({ value: m.id, label: `${m.name}（${m.model_name}）` }))}
+                placeholder="选择用于图片描述的模型"
+                style={{ width: "100%" }}
+                disabled={isDescribing}
+              />
+            </Space>
             <Button
               onClick={handleDescribeImage}
               loading={isDescribing}

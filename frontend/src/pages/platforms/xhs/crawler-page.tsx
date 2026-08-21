@@ -165,6 +165,7 @@ export function XhsCrawlerPage() {
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [mode, setMode] = useState<XhsDataCrawlMode>("note_urls");
   const [urls, setUrls] = useState("");
+  const [userUrl, setUserUrl] = useState("");
   const [keyword, setKeyword] = useState("");
   const [pages, setPages] = useState(1);
   const [maxNotes, setMaxNotes] = useState(20);
@@ -198,7 +199,8 @@ export function XhsCrawlerPage() {
     setError(null);
     if (!selectedAccountId) { setError("请先选择一个 PC 账号。"); return; }
     const parsedUrls = splitUrls(urls);
-    if (mode !== "search" && parsedUrls.length === 0) { setError("请至少输入一个笔记链接。"); return; }
+    if (mode === "user" && !userUrl.trim()) { setError("请填写用户主页链接。"); return; }
+    if (mode !== "search" && mode !== "user" && parsedUrls.length === 0) { setError("请至少输入一个笔记链接。"); return; }
     if (mode === "search" && !keyword.trim()) { setError("请填写搜索关键词。"); return; }
     setIsRunning(true);
     setItems([]);
@@ -207,7 +209,7 @@ export function XhsCrawlerPage() {
     setProgressMsg(null);
     try {
       const summary = await crawlXhsDataStream(
-        { account_id: selectedAccountId, mode, urls: parsedUrls, keyword: keyword.trim(), pages, max_notes: maxNotes, time_sleep: timeSleep, fetch_comments: mode === "comments" ? false : fetchCommentsChecked, ...filters, geo: filters.geo.trim() },
+        { account_id: selectedAccountId, mode, urls: parsedUrls, keyword: keyword.trim(), user_url: userUrl.trim(), pages, max_notes: maxNotes, time_sleep: timeSleep, fetch_comments: mode === "comments" ? false : fetchCommentsChecked, ...filters, geo: filters.geo.trim() },
         (index, item) => { setItems((prev) => [...prev, item]); },
         (msg) => { setProgressMsg(msg); },
         (msg) => { setError(msg); },
@@ -263,7 +265,7 @@ export function XhsCrawlerPage() {
             </Col>
             <Col span={8}>
               <Form.Item label="抓取方式">
-                <Select value={mode} onChange={(v) => setMode(v)} options={[{ value: "note_urls", label: "直接爬取笔记链接" }, { value: "search", label: "通过搜索爬取详情" }, { value: "comments", label: "只爬取评论" }]} />
+                <Select value={mode} onChange={(v) => setMode(v)} options={[{ value: "note_urls", label: "直接爬取笔记链接" }, { value: "search", label: "通过搜索爬取详情" }, { value: "comments", label: "只爬取评论" }, { value: "user", label: "账号主页链接（抓取全部笔记）" }]} />
               </Form.Item>
             </Col>
             <Col span={4}>
@@ -285,6 +287,27 @@ export function XhsCrawlerPage() {
               <Col span={4}><Form.Item label="时间范围"><Select value={filters.note_time} onChange={(v) => setFilters((c) => ({ ...c, note_time: v }))} options={noteTimeOptions} /></Form.Item></Col>
               <Col span={4}><Form.Item label="距离"><Select value={filters.pos_distance} onChange={(v) => setFilters((c) => ({ ...c, pos_distance: v }))} options={distanceOptions} /></Form.Item></Col>
               <Col span={4}><Form.Item label="Geo"><Input value={filters.geo} onChange={(e) => setFilters((c) => ({ ...c, geo: e.target.value }))} placeholder="经纬度" /></Form.Item></Col>
+            </Row>
+          ) : mode === "user" ? (
+            <Row gutter={16}>
+              <Col span={16}>
+                <Form.Item
+                  label="用户主页链接"
+                  extra="请从浏览器复制该账号主页的完整链接（需含 xsec_token 参数），将抓取该账号发布的所有笔记"
+                >
+                  <Input
+                    value={userUrl}
+                    onChange={(e) => setUserUrl(e.target.value)}
+                    placeholder="https://www.xiaohongshu.com/user/profile/xxxx?xsec_token=..."
+                    disabled={isRunning}
+                  />
+                </Form.Item>
+              </Col>
+              <Col span={8}>
+                <Form.Item label="爬取数量" extra="达到数量后自动停止">
+                  <InputNumber min={1} max={500} value={maxNotes} onChange={(v) => setMaxNotes(v ?? 20)} style={{ width: "100%" }} disabled={isRunning} />
+                </Form.Item>
+              </Col>
             </Row>
           ) : (
             <Form.Item label="笔记链接"><Input.TextArea value={urls} onChange={(e) => setUrls(e.target.value)} placeholder="每行一个链接，也可以用英文逗号分隔" rows={4} /></Form.Item>

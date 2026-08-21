@@ -20,6 +20,7 @@ import {
   SendOutlined,
   SettingOutlined,
   ThunderboltOutlined,
+  TeamOutlined,
   StarOutlined,
   SunOutlined,
   UserOutlined,
@@ -92,6 +93,10 @@ export function AppShell() {
   const [collapsed, setCollapsed] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
+
+  const footerItems = auth.user?.is_admin
+    ? [...(footerNavItems ?? []), { key: "/admin/users", icon: <TeamOutlined />, label: "账号管理" }]
+    : footerNavItems;
 
   const loadNotifications = useCallback(async () => {
     try {
@@ -184,7 +189,7 @@ export function AppShell() {
 
           {/* Footer — pinned to bottom */}
           <div style={{ flexShrink: 0, borderTop: "1px solid #303030" }}>
-            <Menu theme="dark" mode="inline" selectedKeys={selectedKeys} onClick={handleMenuClick} items={footerNavItems} style={{ borderRight: 0 }} />
+            <Menu theme="dark" mode="inline" selectedKeys={selectedKeys} onClick={handleMenuClick} items={footerItems} style={{ borderRight: 0 }} />
             <div style={{ padding: collapsed ? "8px 0" : "8px 16px", borderTop: "1px solid #262626", display: "flex", alignItems: "center", gap: 8, justifyContent: collapsed ? "center" : "flex-start" }}>
               <Avatar size={22} icon={<UserOutlined />} style={{ background: "#1668dc", flexShrink: 0, fontSize: 11 }}>{(auth.user?.username ?? "U")[0].toUpperCase()}</Avatar>
               {!collapsed && (

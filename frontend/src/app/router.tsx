@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 
+import { AdminUsersPage } from "../pages/admin/admin-users-page";
 import { AppShell } from "../components/layout/app-shell";
 import { ComingSoonPage } from "../components/platforms/coming-soon";
 import { ProtectedRoute, PublicOnlyRoute } from "../components/ui/protected-route";
@@ -82,6 +83,7 @@ export function AppRouter() {
           <Route path="/tasks" element={<TaskCenterPage />} />
           <Route path="/models" element={<ModelConfigPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/admin/users" element={<AdminUsersPage />} />
         </Route>
       </Routes>
     </BrowserRouter>

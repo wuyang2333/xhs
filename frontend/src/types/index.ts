@@ -33,6 +33,15 @@ export type DashboardOverview = {
 export type PlatformUser = {
   id: number;
   username: string;
+  is_admin: boolean;
+};
+
+export type AdminUser = {
+  id: number;
+  username: string;
+  is_admin: boolean;
+  created_at: string | null;
+  shares_user_id?: number | null;
 };
 
 export type AuthTokens = {
@@ -152,13 +161,14 @@ export type XhsSearchOptions = {
   geo?: string;
 };
 
-export type XhsDataCrawlMode = "note_urls" | "search" | "comments";
+export type XhsDataCrawlMode = "note_urls" | "search" | "comments" | "user";
 
 export type XhsDataCrawlPayload = {
   account_id: number;
   mode: XhsDataCrawlMode;
   urls?: string[];
   keyword?: string;
+  user_url?: string;
   pages?: number;
   max_notes?: number;
   time_sleep?: number;
@@ -387,6 +397,11 @@ export type ModelConfig = {
   base_url: string;
   has_api_key: boolean;
   is_default: boolean;
+};
+
+export type DescribeOptionsResponse = {
+  items: ModelConfig[];
+  current_id: number | null;
 };
 
 export type ModelConfigPayload = {
@@ -867,7 +882,7 @@ export type AutoTaskRunResult = {
     id: number;
     status: string;
     platform_account_id: number;
-  };
+  } | null;
 };
 
 export type AppNotification = {

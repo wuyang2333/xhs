@@ -48,9 +48,10 @@ class CrawlUserNotesRequest(BaseModel):
 
 class DataCrawlRequest(BaseModel):
     account_id: int
-    mode: Literal["note_urls", "search", "comments"]
+    mode: Literal["note_urls", "search", "comments", "user"]
     urls: list[str] = Field(default_factory=list, max_length=100)
     keyword: str = Field(default="", max_length=120)
+    user_url: str = Field(default="", max_length=500)
     pages: int = Field(default=1, ge=1, le=20)
     max_notes: int = Field(default=20, ge=1, le=200)
     time_sleep: float = Field(default=0, ge=0, le=60)
@@ -243,7 +244,8 @@ def crawl_search_notes(
         _fail_task(db, task, message or "XHS search crawl failed")
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message or "XHS search crawl failed")
 
-    normalized_items = [_normalize_search_item(item) for item in _data_items(raw_payload)]
+    items = raw_payload if isinstance(raw_payload, list) else _data_items(raw_payload)
+    normalized_items = [_normalize_search_item(item) for item in items]
     saved_notes = _save_normalized_notes(db, account, normalized_items) if payload.save_to_library else []
     task = _complete_task(
         db,
@@ -407,6 +409,49 @@ def crawl_data(
                     yield _sse_event({"type": "item", "index": len(items) - 1, "item": item})
                     if index < len(payload.urls) - 1:
                         _sleep_between_requests(payload.time_sleep)
+
+            elif payload.mode == "user":
+                user_url = (payload.user_url or "").strip()
+                if not user_url:
+                    yield _sse_event({"type": "error", "message": "请填写用户主页链接"})
+                    error_occurred = True
+                else:
+                    try:
+                        success, message, note_list = adapter.get_user_notes(user_url)
+                    except Exception as exc:
+                        success, message, note_list = False, str(exc), []
+                    if not success or not isinstance(note_list, list):
+                        yield _sse_event({"type": "error", "message": message or "账号主页笔记读取失败"})
+                        error_occurred = True
+                    else:
+                        seen_urls: list[str] = []
+                        for index, raw_item in enumerate(note_list):
+                            if len(items) >= payload.max_notes:
+                                break
+                            try:
+                                search_note = _normalize_search_item(raw_item)
+                            except Exception:
+                                continue
+                            note_url = search_note.get("note_url") or ""
+                            source = note_url or str(search_note.get("note_id") or f"主页第{index + 1}条")
+                            if source in seen_urls:
+                                continue
+                            seen_urls.append(source)
+                            comments_list: list[dict[str, Any]] = []
+                            if payload.fetch_comments and note_url:
+                                cs, cm, cp = adapter.get_note_comments(note_url)
+                                if cs:
+                                    comments_list = normalize_comment_payload(cp)
+                                else:
+                                    item = _crawl_data_item(source=source, status="failed", note=search_note, error=cm or "comment failed")
+                                    items.append(item)
+                                    yield _sse_event({"type": "item", "index": len(items) - 1, "item": item})
+                                    _sleep_between_requests(payload.time_sleep)
+                                    continue
+                            item = _crawl_data_item(source=source, status="success", note=search_note, comments=comments_list)
+                            items.append(item)
+                            yield _sse_event({"type": "item", "index": len(items) - 1, "item": item})
+                            _sleep_between_requests(payload.time_sleep)
 
             else:
                 if not payload.keyword.strip():

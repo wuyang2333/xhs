@@ -290,8 +290,11 @@ export function AutoOpsPage() {
       const result = await runAutoTask(task.id);
       setLastRunResult(result);
       setTasks((prev) => prev.map((t) => (t.id === result.auto_task.id ? result.auto_task : t)));
+      const jobText = result.publish_job
+        ? `，已创建发布任务 #${result.publish_job.id}`
+        : "，仅生成草稿（未创建发布任务）";
       setMessage(
-        `任务"${task.name}"执行完成 -- 关键词: ${result.keyword}, 来源笔记: ${result.source_note.title}, 已创建发布任务 #${result.publish_job.id}。`
+        `任务"${task.name}"执行完成 -- 关键词: ${result.keyword}, 来源笔记: ${result.source_note.title}${jobText}。`
       );
     } catch (err: unknown) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
@@ -597,7 +600,9 @@ export function AutoOpsPage() {
             <Descriptions.Item label="互动量">
               {lastRunResult.source_note.likes + lastRunResult.source_note.collects + lastRunResult.source_note.comments}
             </Descriptions.Item>
-            <Descriptions.Item label="发布任务">#{lastRunResult.publish_job.id}</Descriptions.Item>
+            <Descriptions.Item label="发布任务">
+              {lastRunResult.publish_job ? `#${lastRunResult.publish_job.id}` : "仅草稿（无发布任务）"}
+            </Descriptions.Item>
           </Descriptions>
           <div style={{ marginTop: 12 }}>
             <Text type="secondary" style={{ fontSize: 12 }}>

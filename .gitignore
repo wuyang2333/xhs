@@ -16,8 +16,14 @@ node_modules/
 # User data (each machine has its own)
 *.db
 *.db-journal
+*.db.bak-*
+data/*.bak-*
 data/backups/
 backend/app/storage/
+
+# 本地 Obsidian 笔记与一次性脚本（不推送）
+zhiling/
+work-patchD.py
 
 # OS
 .DS_Store

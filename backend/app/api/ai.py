@@ -134,6 +134,25 @@ def _text_model_context(db: Session, current_user: User) -> tuple[ModelConfig, s
     return model_config, api_key
 
 
+def _get_default_vision_model(db: Session, current_user: User) -> ModelConfig:
+    config = db.scalars(
+        select(ModelConfig).where(
+            ModelConfig.user_id == current_user.id,
+            ModelConfig.model_type == "vision",
+            ModelConfig.is_default.is_(True),
+        )
+    ).first()
+    if config is None:
+        return _get_default_text_model(db, current_user)
+    return config
+
+
+def _vision_model_context(db: Session, current_user: User) -> tuple[ModelConfig, str]:
+    model_config = _get_default_vision_model(db, current_user)
+    api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
+    return model_config, api_key
+
+
 def _image_model_context(db: Session, current_user: User) -> tuple[ModelConfig, str]:
     model_config = _get_default_image_model(db, current_user)
     api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
@@ -726,7 +745,7 @@ def describe_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _vision_model_context(db, current_user)
     task, text = _recorded_image_task(
         db=db,
         current_user=current_user,

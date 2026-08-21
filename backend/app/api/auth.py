@@ -27,6 +27,7 @@ class RefreshRequest(BaseModel):
 class UserResponse(BaseModel):
     id: int
     username: str
+    is_admin: bool
 
 
 class TokenResponse(BaseModel):
@@ -37,7 +38,7 @@ class TokenResponse(BaseModel):
 
 
 def _serialize_user(user: User) -> dict:
-    return {"id": user.id, "username": user.username}
+    return {"id": user.id, "username": user.username, "is_admin": bool(user.is_admin)}
 
 
 def _token_response(user: User) -> dict:

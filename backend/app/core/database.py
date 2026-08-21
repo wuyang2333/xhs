@@ -39,6 +39,7 @@ def init_db(bind=engine) -> None:
 
     _run_alembic_migrations()
     _normalize_model_config_names(bind)
+    _ensure_admin_column(bind)
     _normalize_sqlite_datetime_storage(bind)
 
 
@@ -99,6 +100,44 @@ def _normalize_model_config_names(bind) -> None:
             return
         connection.execute(text("UPDATE model_configs SET model_name = 'gpt-5.4' WHERE model_name = 'gpt5.4'"))
         connection.execute(text("INSERT INTO app_migrations (name) VALUES ('normalize_legacy_gpt_54_model_name_v1')"))
+
+
+
+
+def _ensure_admin_column(bind) -> None:
+    """给 users 表补 is_admin 列，并把首个用户设为管理员（幂等，走 app_migrations）。"""
+    inspector = inspect(bind)
+    table_names = set(inspector.get_table_names())
+    if "users" not in table_names:
+        return
+    with bind.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE IF NOT EXISTS app_migrations ("
+                "name VARCHAR(128) PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL)"
+            )
+        )
+        columns = {c["name"] for c in inspector.get_columns("users")}
+
+        # 共享列（子管理员）独立打标记，不因管理员标记已存在而跳过
+        applied_shares = connection.execute(
+            text("SELECT name FROM app_migrations WHERE name = 'shares_column_v1'")
+        ).first()
+        if not applied_shares:
+            if "shares_user_id" not in columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN shares_user_id INTEGER"))
+                connection.execute(text("CREATE INDEX IF NOT EXISTS ix_users_shares_user_id ON users (shares_user_id)"))
+            connection.execute(text("INSERT INTO app_migrations (name) VALUES ('shares_column_v1')"))
+
+        # 管理员列
+        applied_admin = connection.execute(
+            text("SELECT name FROM app_migrations WHERE name = 'admin_column_v1'")
+        ).first()
+        if not applied_admin:
+            if "is_admin" not in columns:
+                connection.execute(text("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT 0"))
+            connection.execute(text("UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)"))
+            connection.execute(text("INSERT INTO app_migrations (name) VALUES ('admin_column_v1')"))
 
 
 def _normalize_sqlite_datetime_storage(bind) -> None:

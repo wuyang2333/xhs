@@ -628,7 +628,7 @@ class OpenAICompatibleImageClient:
                         "role": "user",
                         "content": [
                             {"type": "text", "text": instruction or "描述这张图片适合的小红书卖点。"},
-                            {"type": "image_url", "image_url": {"url": image_url}},
+                            {"type": "image_url", "image_url": {"url": self._resolve_image_ref(image_url)}},
                         ],
                     },
                 ],

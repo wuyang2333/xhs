@@ -9,14 +9,14 @@ from datetime import date, datetime, time
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.time import shanghai_now
 from backend.app.core.security import decrypt_text
-from backend.app.models import AccountCookieVersion, AccountOperationProfile, AutoTask, LearningInsight, ModelConfig, Note, OperationPlan, OperationStrategyProposal, PlatformAccount, PublishJob, User
+from backend.app.models import AccountCookieVersion, AccountOperationProfile, AiDraft, AutoTask, LearningInsight, ModelConfig, Note, NoteAsset, NoteComment, OperationPlan, OperationStrategyProposal, PlatformAccount, PublishJob, User, note_tags
 from backend.app.services.ai_service import OpenAICompatibleTextClient
 
 router = APIRouter(prefix="/operations", tags=["operations"])
@@ -376,7 +376,8 @@ def sync_account_content(account_id: int, current_user: User = Depends(get_curre
                     success, message, raw = XhsPcApiAdapter(cookies).get_user_notes(homepage_url)
                     if not success:
                         raise RuntimeError(message or "主页笔记读取失败")
-                    normalized = [_normalize_search_item(item) for item in _data_items(raw)]
+                    items = raw if isinstance(raw, list) else _data_items(raw)
+                    normalized = [_normalize_search_item(item) for item in items]
                     remote_saved = len(_save_normalized_notes(db, target, normalized))
                 except Exception as exc:
                     remote_error = str(exc)
@@ -397,6 +398,26 @@ def sync_account_content(account_id: int, current_user: User = Depends(get_curre
         "total": len(notes), "remote_error": remote_error, "mobile_profile": mobile_profile,
         "strategy_proposal": _proposal_item(proposal) if proposal else None,
     }
+
+
+@router.delete("/accounts/{account_id}/content")
+def clear_account_content(account_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    target = _account(db, current_user.id, account_id)
+    notes = db.scalars(select(Note).where(
+        Note.user_id == current_user.id,
+        Note.platform_account_id == target.id,
+    )).all()
+    note_ids = [note.id for note in notes]
+    if note_ids:
+        db.execute(delete(note_tags).where(note_tags.c.note_id.in_(note_ids)))
+        db.execute(delete(NoteAsset).where(NoteAsset.note_id.in_(note_ids)))
+        db.execute(delete(NoteComment).where(NoteComment.note_id.in_(note_ids)))
+        for draft in db.scalars(select(AiDraft).where(AiDraft.source_note_id.in_(note_ids))).all():
+            draft.source_note_id = None
+        db.flush()
+        db.execute(delete(Note).where(Note.id.in_(note_ids)))
+        db.commit()
+    return {"account_id": account_id, "deleted": len(note_ids)}
 
 
 @router.get("/strategy-proposals")

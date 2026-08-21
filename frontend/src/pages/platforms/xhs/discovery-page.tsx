@@ -13,11 +13,11 @@ import {
   SearchOutlined,
   StarOutlined,
 } from "@ant-design/icons";
-import { Alert, Badge, Button, Card, Col, Descriptions, Drawer, Empty, Input, Row, Select, Space, Spin, Tag, Typography } from "antd";
+import { Alert, Badge, Button, Card, Col, Descriptions, Drawer, Empty, Input, InputNumber, Row, Select, Space, Spin, Tag, Typography } from "antd";
 import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { fetchAccounts, fetchSavedNoteIds, fetchXhsNoteComments, fetchXhsNoteDetail, saveXhsNotesToLibrary, searchXhsNotes } from "../../../lib/api";
+import { discoverUserNotes, fetchAccounts, fetchSavedNoteIds, fetchXhsNoteComments, fetchXhsNoteDetail, saveXhsNotesToLibrary, searchXhsNotes } from "../../../lib/api";
 import type { NoteComment, PlatformAccount, XhsSearchNote, XhsSearchOptions } from "../../../types";
 
 const { Title, Text, Paragraph } = Typography;
@@ -75,6 +75,9 @@ export function XhsDiscoveryPage() {
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [keyword, setKeyword] = useState("");
   const [noteUrl, setNoteUrl] = useState("");
+  const [userUrl, setUserUrl] = useState("");
+  const [userLimit, setUserLimit] = useState(100);
+  const [isDiscovering, setIsDiscovering] = useState(false);
   const [filters, setFilters] = useState({ sort_type_choice: 0, note_type: 0, note_time: 0, note_range: 0, pos_distance: 0, geo: "" });
   const [notes, setNotes] = useState<XhsSearchNote[]>([]);
   const [page, setPage] = useState(1);
@@ -160,6 +163,25 @@ export function XhsDiscoveryPage() {
     } catch (err: unknown) { const a = err as { response?: { status?: number; data?: { detail?: string } }; message?: string }; setError(a?.response?.data?.detail ? `[${a.response.status}] ${a.response.data.detail}` : `URL 直查失败：${a?.message || "请检查网络"}`); } finally { setIsFetchingUrl(false); }
   }
 
+  async function handleDiscoverUserNotes() {
+    setError(null);
+    if (!selectedAccountId) { setError("请先选择一个 PC 账号。"); return; }
+    const cleanUrl = userUrl.trim();
+    if (!cleanUrl) { setError("请输入用户主页链接。"); return; }
+    setIsDiscovering(true);
+    try {
+      const result = await discoverUserNotes({ account_id: selectedAccountId, user_url: cleanUrl, limit: userLimit });
+      setNotes(result.items);
+      setPage(1); setHasMore(false); setDetailMediaIndex(0); setSelectedNote(null);
+      setSearchedKeyword(`主页发现：账号共 ${result.total} 篇，本次展示 ${result.items.length} 篇`);
+      setCommentPreviewByNoteId({}); setCommentPreviewErrors({});
+      setSavedNoteIds([]); void loadSavedNoteIds();
+    } catch (err: unknown) {
+      const a = err as { response?: { status?: number; data?: { detail?: string } }; message?: string };
+      setError(a?.response?.data?.detail ? `[${a.response.status}] ${a.response.data.detail}` : `主页发现失败：${a?.message || "请检查网络"}`);
+    } finally { setIsDiscovering(false); }
+  }
+
   async function openDetail(note: XhsSearchNote) {
     setDetailMediaIndex(0); setSelectedNote(note); setDetailError(null);
     if (!selectedAccountId) { setDetailError("请先选择一个 PC 账号。"); return; }
@@ -213,6 +235,12 @@ export function XhsDiscoveryPage() {
           <Row gutter={12} style={{ marginTop: 12 }} align="bottom">
             <Col span={6}><div style={{ marginBottom: 4 }}><Text type="secondary" style={{ fontSize: 12 }}>笔记 URL</Text></div><Input value={noteUrl} onChange={(e) => setNoteUrl(e.target.value)} placeholder="https://www.xiaohongshu.com/explore/..." /></Col>
             <Col><Button icon={<SearchOutlined />} loading={isFetchingUrl} disabled={noPcAccount} onClick={handleFetchUrlDetail}>URL 直查</Button></Col>
+          </Row>
+          <Row gutter={12} style={{ marginTop: 12 }} align="bottom">
+            <Col span={8}><div style={{ marginBottom: 4 }}><Text type="secondary" style={{ fontSize: 12 }}>用户主页链接</Text></div><Input value={userUrl} onChange={(e) => setUserUrl(e.target.value)} placeholder="https://www.xiaohongshu.com/user/profile/xxxx?xsec_token=..." disabled={isDiscovering} /></Col>
+            <Col span={3}><div style={{ marginBottom: 4 }}><Text type="secondary" style={{ fontSize: 12 }}>抓取数量</Text></div><InputNumber min={1} max={500} value={userLimit} onChange={(v) => setUserLimit(v ?? 100)} style={{ width: "100%" }} disabled={isDiscovering} /></Col>
+            <Col><Button type="primary" icon={<LinkOutlined />} loading={isDiscovering} disabled={noPcAccount} onClick={handleDiscoverUserNotes}>主页发现</Button></Col>
+            <Col style={{ alignSelf: "center" }}><Text type="secondary" style={{ fontSize: 12 }}>通过主页链接发现该账号笔记，最多展示所选数量（链接需含 xsec_token）</Text></Col>
           </Row>
         </form>
         {error && <Alert message={error} type="error" showIcon style={{ marginTop: 12 }} closable onClose={() => setError(null)} />}

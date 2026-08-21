@@ -41,6 +41,12 @@ class NoteCommentsRequest(BaseModel):
     note_url: str = Field(min_length=1)
 
 
+class UserNotesRequest(BaseModel):
+    account_id: int
+    user_url: str = Field(min_length=1, max_length=500)
+    limit: int = Field(default=200, ge=1, le=500)
+
+
 def get_xhs_pc_api_adapter_factory():
     return XhsPcApiAdapter
 
@@ -384,8 +390,29 @@ def note_comments_placeholder():
 
 
 @router.post("/users/notes")
-def user_notes():
-    return {"total": len(sample_notes()), "items": sample_notes()}
+def user_notes(
+    payload: UserNotesRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory=Depends(get_xhs_pc_api_adapter_factory),
+):
+    """通过用户主页链接发现该账号发布的所有笔记，按 limit 返回指定数量。"""
+    cookies = _get_owned_pc_account_cookies(db, current_user, payload.account_id)
+    try:
+        success, message, note_list = adapter_factory(cookies).get_user_notes(payload.user_url)
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"账号主页笔记读取失败: {exc}") from exc
+    if not success or not isinstance(note_list, list):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=message or "账号主页笔记读取失败")
+    seen: dict[str, dict[str, Any]] = {}
+    for item in note_list:
+        if not isinstance(item, dict):
+            continue
+        normalized = _normalize_search_item(item)
+        seen.setdefault(str(normalized.get("note_id") or ""), normalized)
+    all_items = list(seen.values())
+    items = all_items[: payload.limit]
+    return {"total": len(all_items), "limit": payload.limit, "items": items}
 
 
 @router.get("/homefeed/channels")
