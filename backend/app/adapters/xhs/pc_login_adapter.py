@@ -15,8 +15,15 @@ class XhsPcLoginAdapter:
             success, message, payload = api.generate_qrcode(cookies)
         if not success or not payload:
             raise RuntimeError(message)
+        with direct_xhs_request_env():
+            success, message, cookies = api.check_qrcode_status(
+                payload["qr_id"], payload["code"], payload["cookies"]
+            )
+            if success or message != "请扫描二维码":
+                raise RuntimeError(f"Unexpected initial QR code status: {message}")
+            api.ensure_webprofile(cookies)
         return {
-            "cookies": payload["cookies"],
+            "cookies": cookies,
             "qr_id": payload["qr_id"],
             "code": payload["code"],
             "qr_url": payload["qr_url"],

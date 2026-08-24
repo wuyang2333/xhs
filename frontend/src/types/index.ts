@@ -537,6 +537,7 @@ export type GenerateCoverPayload = {
 
 export type GenerateImagePayload = {
   prompt: string;
+  model_config_id?: number;
   reference_images?: string[];
   save_to_assets?: boolean;
 };

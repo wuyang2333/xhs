@@ -44,6 +44,7 @@ import {
   describeImageWithAi,
   fetchDescribeOptions,
   fetchGeneratedImageAssets,
+  fetchModelConfigs,
   fetchUserImages,
   generateImageWithAi,
   setDescribeDefault,
@@ -90,7 +91,10 @@ export function XhsImageStudioPage() {
   const composer = usePromptComposer();
   const navigate = useNavigate();
   const [imagePrompt, setImagePrompt] = useState<PromptPickerValue>(EMPTY_PROMPT_PICK);
+  const [imageModelOptions, setImageModelOptions] = useState<ModelConfig[]>([]);
+  const [imageModelId, setImageModelId] = useState<number | null>(null);
   const [describePrompt, setDescribePrompt] = useState<PromptPickerValue>(EMPTY_PROMPT_PICK);
+  const [describeInstruction, setDescribeInstruction] = useState("");
   const [describeOptions, setDescribeOptions] = useState<ModelConfig[]>([]);
   const [describeModelId, setDescribeModelId] = useState<number | null>(null);
   const [aiPage, setAiPage] = useState(1);
@@ -136,6 +140,7 @@ export function XhsImageStudioPage() {
     try {
       const result = await generateImageWithAi({
         prompt: finalPrompt,
+        model_config_id: imageModelId ?? undefined,
         reference_images:
           referenceImages.length > 0 ? referenceImages : undefined,
         save_to_assets: saveToAssets,
@@ -159,6 +164,12 @@ export function XhsImageStudioPage() {
   }
 
   useEffect(() => {
+    fetchModelConfigs("image")
+      .then((data) => {
+        setImageModelOptions(data.items);
+        setImageModelId(data.items.find((item) => item.is_default)?.id ?? data.items[0]?.id ?? null);
+      })
+      .catch(() => {});
     fetchDescribeOptions()
       .then((data: DescribeOptionsResponse) => {
         setDescribeOptions(data.items);
@@ -186,10 +197,13 @@ export function XhsImageStudioPage() {
     setError(null);
     setMessage(null);
     try {
+      const finalInstruction = describePrompt.promptId !== null
+        ? [describePrompt.content, describeInstruction.trim()].filter(Boolean).join("\n")
+        : describeInstruction.trim();
       const result = await describeImageWithAi({
         image_url: imageUrl.trim(),
-        // 未选指令时留空，由后端用默认人设。
-        system_prompt_override: describePrompt.content || undefined,
+        // 指令和补充提示词都为空时留空，由后端使用默认分析指令。
+        instruction: finalInstruction || undefined,
       });
       if (describePrompt.promptId !== null && describePrompt.version !== null) {
         await composer.recordUsages(
@@ -269,6 +283,20 @@ export function XhsImageStudioPage() {
               </Text>
             }
           >
+            <Space direction="vertical" size={4} style={{ width: "100%", marginBottom: 12 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>生图模型</Text>
+              <Select
+                value={imageModelId ?? undefined}
+                onChange={setImageModelId}
+                options={imageModelOptions.map((model) => ({
+                  value: model.id,
+                  label: `${model.name}（${model.model_name}）`,
+                }))}
+                placeholder="选择用于生成图片的模型"
+                style={{ width: "100%" }}
+                disabled={isGenerating}
+              />
+            </Space>
             {/* 指令选择器直接放在表单里。此前做成弹窗，用户两次反馈「没看到」。 */}
             <PromptPicker
               promptType="image"
@@ -501,6 +529,29 @@ export function XhsImageStudioPage() {
               value={describePrompt}
               onChange={setDescribePrompt}
               disabled={isDescribing}
+            />
+            <Space size={8} style={{ marginBottom: 4 }} wrap>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {describePrompt.promptId !== null
+                  ? "已选分析指令，下方内容作为本次补充说明（可留空）"
+                  : "未选分析指令，将按下方提示词分析；两者都为空时使用默认指令"}
+              </Text>
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: 0, height: "auto", fontSize: 12 }}
+                onClick={() => navigate("/platforms/xhs/prompts")}
+              >
+                管理指令库
+              </Button>
+            </Space>
+            <TextArea
+              value={describeInstruction}
+              onChange={(event) => setDescribeInstruction(event.target.value)}
+              placeholder="补充希望重点分析的内容，例如：突出画面风格、产品卖点和适合的小红书使用场景..."
+              rows={3}
+              disabled={isDescribing}
+              style={{ marginBottom: 12 }}
             />
             <Space direction="vertical" size={4} style={{ width: "100%", marginBottom: 12 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>描述模型</Text>

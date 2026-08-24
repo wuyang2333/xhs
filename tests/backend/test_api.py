@@ -1,4 +1,6 @@
+import io
 import os
+import zipfile
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -1666,6 +1668,74 @@ def test_xhs_pc_note_detail_uses_owned_account_cookie_and_normalizes_result(tmp_
                 "url": "https://www.xiaohongshu.com/explore/detail-note-001?xsec_token=detail-token&xsec_source=pc_feed",
             }
         ]
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+        app.dependency_overrides.pop(get_xhs_pc_api_adapter_factory, None)
+
+
+def test_xhs_pc_note_images_downloads_originals_as_zip(tmp_path, monkeypatch):
+    from backend.app.api.platforms.xhs import pc as pc_api
+    from backend.app.api.platforms.xhs.pc import get_xhs_pc_api_adapter_factory
+    from PIL import Image
+
+    class FakeXhsPcDetailAdapter:
+        def __init__(self, cookies):
+            self.cookies = cookies
+
+        def get_note_info(self, url):
+            assert self.cookies == "a1=json-a1; web_session=json-session"
+            assert url.endswith("detail-note-zip")
+            return (
+                True,
+                "ok",
+                {
+                    "data": {
+                        "items": [
+                            {
+                                "note_card": {
+                                    "note_id": "detail-note-zip",
+                                    "image_list": [
+                                        {"url": "https://example.test/original-1.jpg"},
+                                        {"url": "https://example.test/original-2.png"},
+                                    ],
+                                }
+                            }
+                        ]
+                    }
+                },
+            )
+
+    def encoded_image(image_format, color):
+        buffer = io.BytesIO()
+        Image.new("RGB", (120, 150), color).save(buffer, format=image_format)
+        return buffer.getvalue()
+
+    downloaded = {
+        "https://example.test/original-1.jpg": (encoded_image("WEBP", "red"), ".webp"),
+        "https://example.test/original-2.png": (encoded_image("PNG", "blue"), ".png"),
+    }
+    monkeypatch.setattr(pc_api, "fetch_asset_content", lambda url, asset_type: downloaded[url])
+    db_dependency, access_token, account_id = _create_pc_account_with_cookie(tmp_path, "image-zip-owner")
+    app.dependency_overrides[get_xhs_pc_api_adapter_factory] = lambda: FakeXhsPcDetailAdapter
+    try:
+        response = client.post(
+            "/api/xhs/pc/notes/download-images",
+            headers={"Authorization": f"Bearer {access_token}"},
+            json={
+                "account_id": account_id,
+                "url": "https://www.xiaohongshu.com/explore/detail-note-zip",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "application/zip"
+        assert "xhs-note-detail-note-zip-original-images.zip" in response.headers["content-disposition"]
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            assert archive.namelist() == ["01.jpg", "02.jpg"]
+            for file_name in archive.namelist():
+                with Image.open(io.BytesIO(archive.read(file_name))) as image:
+                    assert image.format == "JPEG"
+                    assert image.size == (120, 150)
     finally:
         app.dependency_overrides.pop(db_dependency, None)
         app.dependency_overrides.pop(get_xhs_pc_api_adapter_factory, None)

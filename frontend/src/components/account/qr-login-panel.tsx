@@ -3,7 +3,7 @@ import { ReloadOutlined } from "@ant-design/icons";
 import axios from "axios";
 import { useEffect, useRef, useState } from "react";
 
-import { createXhsCreatorQrLoginSession, createXhsPcQrLoginSession, pollXhsLoginSession } from "../../lib/api";
+import { createXhsPcQrLoginSession, pollXhsLoginSession } from "../../lib/api";
 import type { PlatformAccount, XhsQrLoginSession } from "../../types";
 
 const { Text, Link: AntLink } = Typography;
@@ -36,12 +36,15 @@ export function QrLoginPanel({ accountType, onConfirmed }: QrLoginPanelProps) {
     setError(null);
     confirmedRef.current = false;
     try {
-      const nextSession =
-        accountType === "pc"
-          ? await createXhsPcQrLoginSession({ sync_creator: syncCreator })
-          : await createXhsCreatorQrLoginSession();
+      const nextSession = await createXhsPcQrLoginSession({
+        sync_creator: accountType === "creator" || syncCreator,
+      });
       setSession(nextSession);
-      setStatusText(accountType === "pc" ? "请使用小红书 App 扫描二维码" : "请使用小红书 App 扫描 Creator 二维码");
+      setStatusText(
+        accountType === "pc"
+          ? "请使用小红书 App 扫描二维码"
+          : "请扫描二维码，登录后将自动同步 Creator 账号",
+      );
     } catch (caught) {
       setError(errorMessage(caught));
     } finally {
@@ -69,10 +72,19 @@ export function QrLoginPanel({ accountType, onConfirmed }: QrLoginPanelProps) {
           setStatusText("已扫码，请在手机端确认登录");
         } else if (polled.status === "expired") {
           setStatusText("二维码已过期，请刷新");
-        } else if (polled.status === "confirmed" && polled.account && !confirmedRef.current) {
+        } else if (polled.status === "confirmed" && !confirmedRef.current) {
           confirmedRef.current = true;
+          const confirmedAccount = accountType === "creator" ? polled.creator_account : polled.account;
+          if (!confirmedAccount) {
+            setError(
+              accountType === "creator"
+                ? "PC 登录成功，但 Creator 凭证同步失败，请改用手机验证码或 Cookie 重新绑定。"
+                : "登录成功，但未返回账号信息。",
+            );
+            return;
+          }
           setStatusText("账号绑定成功");
-          onConfirmed(polled.account);
+          onConfirmed(confirmedAccount);
         }
       } catch {
         setError("轮询登录状态失败，正在等待下一次尝试。");
@@ -142,7 +154,14 @@ export function QrLoginPanel({ accountType, onConfirmed }: QrLoginPanelProps) {
         >
           登录 PC 后同步 Creator 账号
         </Checkbox>
-      ) : null}
+      ) : (
+        <Alert
+          type="info"
+          showIcon
+          message="Creator 扫码将通过 PC 登录自动同步凭证"
+          description="这是当前更稳定的扫码方式，登录成功后会更新对应的 Creator 账号。"
+        />
+      )}
 
       {error ? <Alert type="error" message={error} showIcon /> : null}
 

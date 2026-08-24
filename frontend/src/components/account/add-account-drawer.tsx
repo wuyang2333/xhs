@@ -1,5 +1,5 @@
-import { Drawer, Segmented, message } from "antd";
-import { useState } from "react";
+import { Alert, Drawer, Segmented, message } from "antd";
+import { useEffect, useState } from "react";
 
 import type { PlatformAccount } from "../../types";
 import { CookieImportPanel } from "./cookie-import-panel";
@@ -11,6 +11,7 @@ type AddAccountDrawerProps = {
   open: boolean;
   onClose: () => void;
   onBound: () => void;
+  rebindAccount?: PlatformAccount | null;
 };
 
 type AccountType = "pc" | "creator" | "android";
@@ -28,9 +29,21 @@ const loginMethodOptions = [
   { label: "Cookie", value: "cookie" as const },
 ];
 
-export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerProps) {
+export function AddAccountDrawer({ open, onClose, onBound, rebindAccount }: AddAccountDrawerProps) {
   const [accountType, setAccountType] = useState<AccountType>("android");
   const [method, setMethod] = useState<LoginMethod>("qr");
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    if (rebindAccount?.sub_type === "pc" || rebindAccount?.sub_type === "creator") {
+      setAccountType(rebindAccount.sub_type);
+    } else {
+      setAccountType("android");
+    }
+    setMethod("qr");
+  }, [open, rebindAccount]);
 
   function handleConfirmed(account: PlatformAccount) {
     const actionText = account.action === "updated" ? "已更新到账号矩阵" : "已加入账号矩阵";
@@ -45,7 +58,9 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", marginBottom: 4, textTransform: "uppercase", letterSpacing: 1 }}>
             XHS Account
           </div>
-          <div style={{ fontSize: 18, fontWeight: 600, color: "rgba(255,255,255,0.88)" }}>添加小红书账号</div>
+          <div style={{ fontSize: 18, fontWeight: 600, color: "rgba(255,255,255,0.88)" }}>
+            {rebindAccount ? "重新绑定小红书账号" : "添加小红书账号"}
+          </div>
         </div>
       }
       placement="right"
@@ -58,11 +73,21 @@ export function AddAccountDrawer({ open, onClose, onBound }: AddAccountDrawerPro
         body: { background: "#141414", padding: 24 },
       }}
     >
+      {rebindAccount ? (
+        <Alert
+          type="warning"
+          showIcon
+          message={`请重新登录原账号「${rebindAccount.nickname || rebindAccount.external_user_id || rebindAccount.id}」`}
+          description="登录同一个小红书账号后，系统会更新原记录和 Cookie，不会影响已有运营数据。"
+          style={{ marginBottom: 20 }}
+        />
+      ) : null}
       <div style={{ marginBottom: 20 }}>
         <Segmented
           block
           value={accountType}
           options={accountTypeOptions}
+          disabled={Boolean(rebindAccount)}
           onChange={(val) => setAccountType(val as AccountType)}
         />
       </div>

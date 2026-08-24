@@ -2,6 +2,7 @@ import {
   CheckOutlined,
   CommentOutlined,
   DatabaseOutlined,
+  DownloadOutlined,
   HeartOutlined,
   LeftOutlined,
   LinkOutlined,
@@ -17,7 +18,7 @@ import { Alert, Badge, Button, Card, Col, Descriptions, Drawer, Empty, Input, In
 import { FormEvent, MouseEvent, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { discoverUserNotes, fetchAccounts, fetchSavedNoteIds, fetchXhsNoteComments, fetchXhsNoteDetail, saveXhsNotesToLibrary, searchXhsNotes } from "../../../lib/api";
+import { discoverUserNotes, downloadXhsNoteOriginalImages, fetchAccounts, fetchSavedNoteIds, fetchXhsNoteComments, fetchXhsNoteDetail, saveXhsNotesToLibrary, searchXhsNotes } from "../../../lib/api";
 import type { NoteComment, PlatformAccount, XhsSearchNote, XhsSearchOptions } from "../../../types";
 
 const { Title, Text, Paragraph } = Typography;
@@ -87,6 +88,7 @@ export function XhsDiscoveryPage() {
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const [isFetchingUrl, setIsFetchingUrl] = useState(false);
   const [isFetchingDetail, setIsFetchingDetail] = useState(false);
+  const [isDownloadingImages, setIsDownloadingImages] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [searchedKeyword, setSearchedKeyword] = useState("");
   const [savingNoteIds, setSavingNoteIds] = useState<string[]>([]);
@@ -192,6 +194,33 @@ export function XhsDiscoveryPage() {
   }
 
   function closeDetail() { setSelectedNote(null); setDetailMediaIndex(0); setDetailError(null); }
+
+  async function handleDownloadImages(note: XhsSearchNote) {
+    setDetailError(null);
+    if (!selectedAccountId) { setDetailError("请先选择一个 PC 账号。"); return; }
+    const url = getPreviewNoteUrl(note);
+    if (!url) { setDetailError("缺少可用于下载原图的笔记 URL。"); return; }
+    const safeNoteId = note.note_id?.replace(/[^A-Za-z0-9_-]+/g, "-") || "images";
+    setIsDownloadingImages(true);
+    try {
+      await downloadXhsNoteOriginalImages(
+        { account_id: selectedAccountId, url },
+        `xhs-note-${safeNoteId}-original-images.zip`,
+      );
+    } catch (err: unknown) {
+      const requestError = err as { response?: { data?: Blob; status?: number }; message?: string };
+      let message = requestError.message || "请稍后重试";
+      if (requestError.response?.data instanceof Blob) {
+        try {
+          const payload = JSON.parse(await requestError.response.data.text()) as { detail?: string };
+          if (payload.detail) message = payload.detail;
+        } catch { /* keep fallback */ }
+      }
+      setDetailError(`原图下载失败：${message}`);
+    } finally {
+      setIsDownloadingImages(false);
+    }
+  }
 
   function getChildComments(noteId: string, parentId: string): NoteComment[] {
     return (commentPreviewByNoteId[noteId] ?? []).filter((c) => c.parent_comment_id === parentId);
@@ -373,6 +402,9 @@ export function XhsDiscoveryPage() {
                 disabled={savedNoteIds.includes(selectedNote.note_id)}
               >{savedNoteIds.includes(selectedNote.note_id) ? "已保存" : "保存到内容库"}</Button>
               <Button icon={<CommentOutlined />} onClick={() => void handlePreviewComments(selectedNote)}>{commentPreviewByNoteId[selectedNote.note_id] ? "收起评论" : "查看评论"}</Button>
+              {selImgUrls.length > 0 && getNoteKindLabel(selectedNote) === "图文" && (
+                <Button icon={<DownloadOutlined />} loading={isDownloadingImages} onClick={() => void handleDownloadImages(selectedNote)}>下载原图</Button>
+              )}
               {getPreviewNoteUrl(selectedNote) && <Button type="primary" icon={<LinkOutlined />} href={getPreviewNoteUrl(selectedNote)} target="_blank" rel="noreferrer">打开原文</Button>}
             </Space>
 

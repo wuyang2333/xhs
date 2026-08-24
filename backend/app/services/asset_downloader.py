@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from uuid import uuid4
 
@@ -8,17 +9,42 @@ from loguru import logger
 from backend.app.core.config import get_settings
 
 
+def fetch_asset_content(url: str, asset_type: str) -> tuple[bytes, str]:
+    if not url or not url.startswith(("http://", "https://")):
+        raise ValueError("Unsupported asset URL")
+
+    import requests
+
+    response = requests.get(url, timeout=30, headers={"Referer": ""})
+    response.raise_for_status()
+    content = response.content
+    if len(content) < 100:
+        raise ValueError("Downloaded asset is empty")
+    extension = _guess_extension(url, response.headers.get("content-type", ""), asset_type)
+    return content, extension
+
+
+def convert_image_content_to_jpeg(content: bytes, quality: int = 95) -> bytes:
+    from PIL import Image, ImageOps
+
+    with Image.open(io.BytesIO(content)) as source:
+        image = ImageOps.exif_transpose(source)
+        if image.mode in {"RGBA", "LA"} or "transparency" in source.info:
+            rgba = image.convert("RGBA")
+            converted = Image.new("RGB", rgba.size, "white")
+            converted.paste(rgba, mask=rgba.getchannel("A"))
+        else:
+            converted = image.convert("RGB")
+        output = io.BytesIO()
+        converted.save(output, format="JPEG", quality=quality, optimize=True, subsampling=0)
+        return output.getvalue()
+
+
 def download_asset_to_local(url: str, user_id: int, asset_type: str) -> str | None:
     if not url or not url.startswith(("http://", "https://")):
         return None
     try:
-        import requests
-        resp = requests.get(url, timeout=30, headers={"Referer": ""})
-        resp.raise_for_status()
-        content = resp.content
-        if len(content) < 100:
-            return None
-        ext = _guess_extension(url, resp.headers.get("content-type", ""), asset_type)
+        content, ext = fetch_asset_content(url, asset_type)
         file_name = f"xhs-asset-u{user_id}-{uuid4().hex}{ext}"
         media_dir = Path(get_settings().storage_dir) / "media"
         media_dir.mkdir(parents=True, exist_ok=True)

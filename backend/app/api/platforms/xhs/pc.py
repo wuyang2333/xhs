@@ -2,18 +2,26 @@ from __future__ import annotations
 
 import json
 import re
+import tempfile
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from backend.app.adapters.xhs.pc_api_adapter import XhsPcApiAdapter
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
 from backend.app.core.security import decrypt_text
 from backend.app.models import AccountCookieVersion, PlatformAccount, User
+from backend.app.services.asset_downloader import convert_image_content_to_jpeg, fetch_asset_content
 from backend.app.services.mock_data import sample_notes
 
 router = APIRouter(prefix="/xhs/pc", tags=["xhs-pc"])
@@ -365,6 +373,62 @@ def note_detail(
             detail=message or "XHS note detail failed",
         )
     return _normalize_detail_payload(raw_payload or {}, source_url=payload.url)
+
+
+@router.post("/notes/download-images")
+def download_note_images(
+    payload: NoteDetailRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    adapter_factory=Depends(get_xhs_pc_api_adapter_factory),
+):
+    cookies = _get_owned_pc_account_cookies(db, current_user, payload.account_id)
+    success, message, raw_payload = adapter_factory(cookies).get_note_info(payload.url)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=message or "XHS note detail failed",
+        )
+
+    detail = _normalize_detail_payload(raw_payload or {}, source_url=payload.url)
+    image_urls = detail.get("image_urls") or []
+    if not image_urls:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Note has no downloadable images")
+
+    note_id = re.sub(r"[^A-Za-z0-9_-]+", "-", str(detail.get("note_id") or "")).strip("-")
+    archive_name = f"xhs-note-{note_id or uuid4().hex}-original-images.zip"
+    archive_handle = tempfile.NamedTemporaryFile(prefix="xhs-note-images-", suffix=".zip", delete=False)
+    archive_path = Path(archive_handle.name)
+    archive_handle.close()
+    downloaded = 0
+    failures: list[str] = []
+    try:
+        with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            with ThreadPoolExecutor(max_workers=min(4, len(image_urls))) as executor:
+                downloads = [executor.submit(fetch_asset_content, image_url, "image") for image_url in image_urls]
+            for index, download in enumerate(downloads, start=1):
+                try:
+                    content, _ = download.result()
+                    archive.writestr(f"{index:02d}.jpg", convert_image_content_to_jpeg(content))
+                    downloaded += 1
+                except Exception as exc:
+                    failures.append(f"Image {index}: {exc}")
+            if failures:
+                archive.writestr("download-errors.txt", "\n".join(failures))
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+    if downloaded == 0:
+        archive_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Failed to download note images")
+
+    return FileResponse(
+        archive_path,
+        filename=archive_name,
+        media_type="application/zip",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
 
 
 @router.post("/notes/comments")

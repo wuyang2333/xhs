@@ -31,7 +31,7 @@ from xhs_utils.xhs_creator.state import (
 )
 
 
-CREATOR_WEB_BUILD = '1.18.0'
+CREATOR_WEB_BUILD = '1.24.0'
 CREATOR_WEBPROFILE_SDK = '4.3.6'
 CREATOR_LOGIN_ACCEPT_LANGUAGE = 'zh-CN,zh;q=0.9'
 CREATOR_USER_AGENT = (

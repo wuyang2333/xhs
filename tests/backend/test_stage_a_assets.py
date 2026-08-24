@@ -574,6 +574,52 @@ def test_ai_image_generation_without_save_to_assets_creates_no_media_asset(isola
         app.dependency_overrides.pop(get_image_ai_client, None)
 
 
+def test_ai_image_generation_uses_selected_image_model(isolated_api):
+    from backend.app.api.ai import get_image_ai_client
+
+    class RecordingImageClient:
+        selected_model = ""
+
+        def generate_image(self, *, model_config, api_key, prompt, reference_images=None):
+            self.selected_model = model_config.model_name
+            return {"url": "https://cdn.example.test/selected-model.png", "raw": {}}
+
+    token = _register_and_get_access_token("stage-a-ai-selected-model")
+    fake_client = RecordingImageClient()
+    app.dependency_overrides[get_image_ai_client] = lambda: fake_client
+    try:
+        _create_default_image_model(token)
+        selected = client.post(
+            "/api/model-configs",
+            headers=_headers(token),
+            json={
+                "name": "Selected Image",
+                "model_type": "image",
+                "provider": "openai-compatible",
+                "model_name": "image-selected-test",
+                "base_url": "https://api.example.test/v1",
+                "api_key": "sk-image-selected",
+                "is_default": False,
+            },
+        )
+        assert selected.status_code == 200
+
+        response = client.post(
+            "/api/ai/images/generate",
+            headers=_headers(token),
+            json={
+                "prompt": "使用本次选择的模型",
+                "model_config_id": selected.json()["id"],
+                "save_to_assets": False,
+            },
+        )
+
+        assert response.status_code == 200
+        assert fake_client.selected_model == "image-selected-test"
+    finally:
+        app.dependency_overrides.pop(get_image_ai_client, None)
+
+
 def _backfill_session(tmp_path):
     """给回填脚本一个独立库：脚本函数都接收 db，测试直接驱动，不碰真实库。"""
     from backend.app.core.database import Base

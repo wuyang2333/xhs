@@ -63,6 +63,7 @@ export function XhsAccountsPage() {
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [rebindAccount, setRebindAccount] = useState<PlatformAccount | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [checkingAccountIds, setCheckingAccountIds] = useState<Set<number>>(() => new Set());
   const [error, setError] = useState<string | null>(null);
@@ -120,6 +121,21 @@ export function XhsAccountsPage() {
     });
   }
 
+  function openAddAccount() {
+    setRebindAccount(null);
+    setDrawerOpen(true);
+  }
+
+  function openRebindAccount(account: PlatformAccount) {
+    setRebindAccount(account);
+    setDrawerOpen(true);
+  }
+
+  function closeAccountDrawer() {
+    setDrawerOpen(false);
+    setRebindAccount(null);
+  }
+
   useEffect(() => {
     void loadAccounts();
   }, []);
@@ -149,7 +165,7 @@ export function XhsAccountsPage() {
               管理 PC、Creator 与安卓手机账号；安卓账号用于在真实手机上完成发布。
             </Text>
           </div>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setDrawerOpen(true)}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openAddAccount}>
             绑定账号
           </Button>
         </div>
@@ -189,7 +205,7 @@ export function XhsAccountsPage() {
               </Space>
             }
           >
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => setDrawerOpen(true)}>
+            <Button type="primary" icon={<PlusOutlined />} onClick={openAddAccount}>
               添加账号
             </Button>
           </Empty>
@@ -328,7 +344,17 @@ export function XhsAccountsPage() {
                       <Text style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>
                         更新时间：{formatDate(account.updated_at || account.created_at)}
                       </Text>
-                      <Space size={4}>
+                      <Space size={4} wrap>
+                        {account.status === "expired" && !isAndroid ? (
+                          <Button
+                            size="small"
+                            type="primary"
+                            icon={<SyncOutlined />}
+                            onClick={() => openRebindAccount(account)}
+                          >
+                            重新绑定
+                          </Button>
+                        ) : null}
                         <Button
                           size="small"
                           icon={<BarChartOutlined />}
@@ -361,7 +387,12 @@ export function XhsAccountsPage() {
         )}
       </Card>
 
-      <AddAccountDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} onBound={loadAccounts} />
+      <AddAccountDrawer
+        open={drawerOpen}
+        onClose={closeAccountDrawer}
+        onBound={loadAccounts}
+        rebindAccount={rebindAccount}
+      />
     </div>
   );
 }

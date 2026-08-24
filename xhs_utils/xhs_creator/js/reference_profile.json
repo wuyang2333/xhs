@@ -1,13 +1,13 @@
 {
   "schemaVersion": 1,
-  "source": "creator-browser-4.3.6-20260719",
+  "source": "creator-browser-4.3.6-20260824",
   "release": {
     "appId": "ugc",
     "platform": "Windows",
     "signVersion": "4.3.6",
     "b1SdkVersion": "3.5.4",
     "webProfileSdkVersion": "4.3.6",
-    "webBuild": "1.18.0",
+    "webBuild": "1.24.0",
     "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
     "secChUa": "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\""
   },

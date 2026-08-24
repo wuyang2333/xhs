@@ -73,6 +73,7 @@ class GenerateCoverRequest(BaseModel):
 
 class GenerateImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=6000)
+    model_config_id: int | None = Field(default=None, ge=1)
     reference_images: list[str] = Field(default_factory=list)
     save_to_assets: bool = True
 
@@ -155,6 +156,22 @@ def _vision_model_context(db: Session, current_user: User) -> tuple[ModelConfig,
 
 def _image_model_context(db: Session, current_user: User) -> tuple[ModelConfig, str]:
     model_config = _get_default_image_model(db, current_user)
+    api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
+    return model_config, api_key
+
+
+def _selected_image_model_context(
+    db: Session,
+    current_user: User,
+    model_config_id: int | None,
+) -> tuple[ModelConfig, str]:
+    if model_config_id is None:
+        return _image_model_context(db, current_user)
+    model_config = db.get(ModelConfig, model_config_id)
+    if model_config is None or model_config.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model config not found")
+    if model_config.model_type != "image":
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Selected model is not an image model")
     api_key = decrypt_text(model_config.encrypted_api_key) if model_config.encrypted_api_key else ""
     return model_config, api_key
 
@@ -696,7 +713,7 @@ def generate_image(
     db: Session = Depends(get_db),
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
-    model_config, api_key = _image_model_context(db, current_user)
+    model_config, api_key = _selected_image_model_context(db, current_user, payload.model_config_id)
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,

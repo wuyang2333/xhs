@@ -466,6 +466,24 @@ export async function fetchXhsNoteDetail(payload: { account_id: number; url: str
   return response.data;
 }
 
+export async function downloadXhsNoteOriginalImages(
+  payload: { account_id: number; url: string },
+  fileName: string,
+): Promise<void> {
+  const response = await http.post<Blob>("/xhs/pc/notes/download-images", payload, {
+    responseType: "blob",
+    timeout: 120000,
+  });
+  const objectUrl = window.URL.createObjectURL(response.data);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(objectUrl);
+}
+
 export async function fetchXhsNoteComments(payload: {
   account_id: number;
   note_url: string;
