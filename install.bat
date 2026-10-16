@@ -6,7 +6,7 @@ echo ============================================
 echo.
 
 echo [1/3] Cloning from GitHub...
-git clone https://github.com/shatp984-rgb/XHS.git xhs
+git clone https://github.com/wuyang2333/xhs.git xhs
 cd xhs
 echo OK
 echo.
@@ -29,7 +29,7 @@ echo.
 
 echo ============================================
 echo   Setup complete!
-echo   Double-click start.bat to run the system.
-echo   Browser: http://localhost:8000
+echo   Double-click XHS.bat to manage the system.
+echo   Browser: http://localhost:5173
 echo ============================================
 pause

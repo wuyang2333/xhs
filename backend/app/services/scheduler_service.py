@@ -16,6 +16,7 @@ from backend.app.core.database import SessionLocal
 from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
 from backend.app.models import (
+    AccountOperationProfile,
     AccountCookieVersion,
     AiDraft,
     AutoTask,
@@ -434,6 +435,22 @@ def _scheduler_cookies_to_string(value: str) -> str:
     return stripped
 
 
+def _auto_publish_allowed(db: Session, task: AutoTask) -> bool:
+    """Require an explicit account-level opt-out before publishing automatically.
+
+    Missing profiles are intentionally treated as review-required.  This keeps
+    manually-created auto tasks and older tasks safe until the account owner has
+    explicitly disabled review in the operations profile.
+    """
+    profile = db.scalars(
+        select(AccountOperationProfile).where(
+            AccountOperationProfile.user_id == task.user_id,
+            AccountOperationProfile.platform_account_id == task.creator_account_id,
+        )
+    ).first()
+    return profile is not None and profile.review_required is False
+
+
 def _execute_auto_task_background(db: Session, task: AutoTask) -> None:
     """Simplified auto-task execution for background scheduler."""
     import random
@@ -700,6 +717,16 @@ def _execute_auto_task_background(db: Session, task: AutoTask) -> None:
         ))
     db.flush()
 
+    # A strategy/manual auto task may prepare a Creator publish job, but it may
+    # publish irreversibly only after the account owner explicitly disables the
+    # review gate.  Absence of an operations profile is the safe (review) case.
+    if not _auto_publish_allowed(db, task):
+        job.status = "pending"
+        task.total_published = (task.total_published or 0) + 1
+        task.last_run_at = shanghai_now()
+        logger.info(f"Auto task {task.id} created Creator review job {job.id}: keyword={keyword}")
+        return
+
     # Publish via Creator API
     try:
         note_info = {
@@ -762,6 +789,18 @@ def run_due_auto_tasks() -> None:
 
 def _check_single_account(db: Session, account: PlatformAccount, now: datetime) -> str:
     """Check one account's cookie validity. Returns the new status."""
+    # Android accounts authenticate inside the selected phone/user space and do
+    # not store web Cookie versions. Treating them like PC/Creator accounts
+    # would incorrectly mark every Android binding as expired with
+    # "No stored cookie version" during the periodic cookie sweep.
+    if account.sub_type == "android":
+        old_status = account.status
+        if account.status == "expired" and account.status_message == "No stored cookie version":
+            account.status = "active"
+            account.status_message = "已连接：安卓账号不使用网页 Cookie"
+        account.updated_at = now
+        return old_status
+
     from backend.app.adapters.xhs.pc_login_adapter import XhsPcLoginAdapter
     from backend.app.adapters.xhs.creator_login_adapter import XhsCreatorLoginAdapter
     from backend.app.services.account_service import decode_cookie_text

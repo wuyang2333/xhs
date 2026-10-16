@@ -13,6 +13,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import re
+from datetime import datetime
 from pathlib import Path
 
 # Windows 默认用 GBK 编码，手机返回的中文和 emoji 会崩。
@@ -22,6 +23,7 @@ sys.stderr.reconfigure(encoding="utf-8")
 
 
 XHS_PACKAGE = "com.xingin.xhs"
+DEFAULT_ANDROID_USER = "0"
 ADB_IME = "com.android.adbkeyboard/.AdbIME"
 CALIBRATION_SCHEMA = 1
 
@@ -55,6 +57,11 @@ def run_adb(
         text=True,
         capture_output=capture,
         encoding="utf-8",
+        # A stuck uiautomator/USB call must not hold the whole sync task until
+        # its outer 900-second process timeout. dump_ui() will retry transient
+        # failures and surface a readable error when the device is genuinely
+        # unavailable.
+        timeout=45,
     )
 
 
@@ -167,6 +174,67 @@ def _scrollable_node(root: ET.Element) -> ET.Element | None:
     return best
 
 
+def _profile_notes_container(root: ET.Element) -> ET.Element | None:
+    """Find the vertical notes list on a profile page.
+
+    A profile screen can contain a full-screen ViewPager as well as the
+    actual notes RecyclerView.  Swiping the pager does not advance the note
+    grid, so prefer the largest scrollable RecyclerView and fall back to the
+    generic tallest container for older app versions.
+    """
+    recycler_views: list[tuple[int, ET.Element]] = []
+    for node in root.iter("node"):
+        if node.attrib.get("scrollable") != "true":
+            continue
+        class_name = node.attrib.get("class", "")
+        if "RecyclerView" not in class_name:
+            continue
+        try:
+            _, height = _bounds_size(node)
+        except (KeyError, ValueError):
+            continue
+        recycler_views.append((height, node))
+    if recycler_views:
+        return max(recycler_views, key=lambda item: item[0])[1]
+    return _scrollable_node(root)
+
+
+def _swipe_scrollable_container(
+    serial: str,
+    root: ET.Element,
+    *,
+    direction: str,
+    duration_ms: int = 650,
+) -> bool:
+    """Swipe inside a scrollable container using its actual screen bounds."""
+    container = _profile_notes_container(root)
+    if container is None:
+        return False
+    try:
+        left, top, right, bottom = (
+            int(value)
+            for value in container.attrib["bounds"].replace("][", ",").strip("[]").split(",")
+        )
+    except (KeyError, ValueError):
+        return False
+    width = max(1, right - left)
+    height = max(1, bottom - top)
+    mid_x = left + width // 2
+    # Keep the gesture away from the status/navigation bars while still
+    # traversing most of the list in one swipe.
+    margin = max(24, height // 10)
+    if direction == "up":
+        start_y, end_y = bottom - margin, top + margin
+    else:
+        start_y, end_y = top + margin, bottom - margin
+    run_adb(
+        serial, "shell", "input", "swipe",
+        str(mid_x), str(start_y), str(mid_x), str(end_y), str(duration_ms),
+        check=False,
+    )
+    return True
+
+
 def scroll_to_find_node(
     serial: str,
     *,
@@ -264,6 +332,164 @@ def _bounds_size(node: ET.Element) -> tuple[int, int]:
     return x2 - x1, y2 - y1
 
 
+def product_search_control(root: ET.Element) -> ET.Element | None:
+    """Find the product search field/icon without assuming a screen width."""
+    for node in root.iter("node"):
+        if not node.attrib.get("class", "").endswith("EditText"):
+            continue
+        label = "".join(
+            node.attrib.get(attribute, "")
+            for attribute in ("text", "hint", "content-desc")
+        )
+        if "搜索" in label:
+            return node
+
+    category_bounds = []
+    for node in root.iter("node"):
+        if node.attrib.get("text", "") not in {"普通商品", "店内爆品", "最新上架", "热门搜索"}:
+            continue
+        bounds = node.attrib.get("bounds")
+        if bounds:
+            category_bounds.append(
+                tuple(int(value) for value in bounds.replace("][", ",").strip("[]").split(","))
+            )
+    if not category_bounds:
+        return None
+
+    row_top = min(bounds[1] for bounds in category_bounds)
+    row_bottom = max(bounds[3] for bounds in category_bounds)
+    row_right = max(bounds[2] for bounds in category_bounds)
+    candidates = []
+    for node in root.iter("node"):
+        if node.attrib.get("clickable") != "true":
+            continue
+        if not node.attrib.get("class", "").endswith("ImageView"):
+            continue
+        bounds_text = node.attrib.get("bounds")
+        if not bounds_text:
+            continue
+        bounds = tuple(
+            int(value) for value in bounds_text.replace("][", ",").strip("[]").split(",")
+        )
+        center_y = (bounds[1] + bounds[3]) // 2
+        if bounds[0] >= row_right and row_top <= center_y <= row_bottom:
+            candidates.append((bounds[0], node))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
+
+
+def product_result_node(root: ET.Element, keyword: str) -> ET.Element | None:
+    """Find a product result title while excluding the search input itself."""
+    candidates = [
+        node for node in root.iter("node")
+        if node.attrib.get("class", "").endswith("TextView")
+        and keyword in node.attrib.get("text", "").strip()
+    ]
+    exact = next(
+        (node for node in candidates if node.attrib.get("text", "").strip() == keyword),
+        None,
+    )
+    return exact or (candidates[0] if candidates else None)
+
+
+def scroll_to_find_product_result(
+    serial: str,
+    keyword: str,
+    *,
+    max_scrolls: int = 12,
+) -> tuple[ET.Element | None, ET.Element]:
+    """Find a product title across rendered result pages.
+
+    Product search results are commonly virtualized, so a single UI dump can
+    miss an otherwise valid match. Keep the product-specific predicate here so
+    the search EditText itself is never mistaken for a result row.
+    """
+    root = dump_ui(serial)
+    found = product_result_node(root, keyword)
+    if found is not None:
+        return found, root
+
+    previous_signature: str | None = None
+    for _ in range(max_scrolls):
+        container = _scrollable_node(root)
+        if container is None:
+            return None, root
+        cleaned = container.attrib["bounds"].replace("][", ",").strip("[]")
+        left, top, right, bottom = (int(value) for value in cleaned.split(","))
+        mid_x = (left + right) // 2
+        span = (bottom - top) * 6 // 10
+        start_y = top + (bottom - top) * 8 // 10
+        run_adb(
+            serial, "shell", "input", "swipe",
+            str(mid_x), str(start_y), str(mid_x), str(max(top + 10, start_y - span)), "600",
+            check=False,
+        )
+        time.sleep(1.0)
+        root = dump_ui(serial)
+        found = product_result_node(root, keyword)
+        if found is not None:
+            return found, root
+
+        signature = "|".join(
+            node.attrib.get("text", "")
+            for node in root.iter("node")
+            if node.attrib.get("text")
+        )
+        if signature == previous_signature:
+            return None, root
+        previous_signature = signature
+    return None, root
+
+
+def clickable_ancestor(root: ET.Element, node: ET.Element) -> ET.Element | None:
+    """Return the nearest clickable parent from the node's actual XML branch."""
+    parents = {child: parent for parent in root.iter() for child in parent}
+    current = parents.get(node)
+    while current is not None:
+        if current.attrib.get("clickable") == "true":
+            return current
+        current = parents.get(current)
+    return None
+
+
+def topic_candidate(root: ET.Element, topic: str) -> ET.Element | None:
+    """Find an exact Xiaohongshu topic suggestion, excluding editor text."""
+    return next((
+        node for node in root.iter("node")
+        if node.attrib.get("class", "").endswith("TextView")
+        and node.attrib.get("text", "").strip() == topic
+    ), None)
+
+
+def wait_topic_candidate(
+    serial: str,
+    topic: str,
+    *,
+    timeout: float = 5,
+) -> tuple[ET.Element | None, ET.Element]:
+    deadline = time.time() + timeout
+    root = dump_ui(serial)
+    while True:
+        candidate = topic_candidate(root, topic)
+        if candidate is not None or time.time() >= deadline:
+            return candidate, root
+        time.sleep(0.5)
+        root = dump_ui(serial)
+
+
+def topics_from_file(path: str | None) -> list[str]:
+    if not path:
+        return []
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise SystemExit("topics-file must contain a JSON list")
+    topics = []
+    for item in raw:
+        topic = str(item).strip().lstrip("#")
+        if topic and topic not in topics:
+            topics.append(topic)
+    return topics[:10]
+
+
 def selectable_thumbnails(root: ET.Element) -> list[ET.Element]:
     """Find gallery tiles across stable and resource-obfuscated XHS builds.
 
@@ -295,7 +521,9 @@ def selectable_thumbnails(root: ET.Element) -> list[ET.Element]:
         if not node.attrib.get("class", "").endswith("ImageView"):
             continue
         width, height = _bounds_size(node)
-        if width >= 250 and height >= 250 and abs(width - height) <= 40:
+        # 三列相册在 720px 宽设备上单格只有 236px。旧阈值 250 会把真实
+        # 缩略图全部排除，最终误报 0 张；180 仍能排除顶部按钮和 100px 选择圈。
+        if width >= 180 and height >= 180 and abs(width - height) <= 40:
             candidates.append(node)
     return sorted(candidates, key=_position_key)
 
@@ -369,10 +597,10 @@ def open_dedicated_album(serial: str) -> ET.Element:
     return root
 
 
-def enter_gallery(serial: str) -> ET.Element:
+def enter_gallery(serial: str, android_user: str = DEFAULT_ANDROID_USER) -> ET.Element:
     """Start a note and stop safely in the dedicated image album."""
-    run_adb(serial, "shell", "am", "force-stop", XHS_PACKAGE)
-    command_open(type("Args", (), {"serial": serial})())
+    run_adb(serial, "shell", "am", "force-stop", "--user", android_user, XHS_PACKAGE)
+    command_open(type("Args", (), {"serial": serial, "android_user": android_user})())
     time.sleep(2)
     entry = wait_node(
         serial,
@@ -446,48 +674,139 @@ def broadcast_unicode(serial: str, text: str) -> None:
     )
 
 
+def move_body_cursor_to_end(serial: str) -> None:
+    """Place the rich-text cursor at the true end before inserting a topic."""
+    root = dump_ui(serial)
+    body = next((
+        node for node in root.iter("node")
+        if node.attrib.get("class", "").endswith("EditText")
+        and node.attrib.get("hint", "").startswith("添加正文")
+    ), None)
+    if body is None:
+        raise SystemExit("找不到正文输入框，无法把话题追加到正文末尾")
+    tap_node(serial, body)
+    time.sleep(0.3)
+    run_adb(serial, "shell", "input", "keyevent", *(["20"] * 120))
+    run_adb(serial, "shell", "input", "keyevent", "123")
+    run_adb(serial, "shell", "input", "keyevent", "111", check=False)
+    time.sleep(0.4)
+    root = dump_ui(serial)
+    editor_done = find_node(root, texts=("完成",))
+    if editor_done is not None:
+        tap_node(serial, editor_done)
+        time.sleep(0.5)
+
+
+def attach_topics(serial: str, topics: list[str]) -> dict[str, list[str]]:
+    """Bind topics through Xiaohongshu suggestions instead of plain # text."""
+    cleaned = [topic.strip().lstrip("#") for topic in topics if topic.strip()]
+    if not cleaned:
+        return {"bound": [], "skipped": []}
+    bound: list[str] = []
+    skipped: list[str] = []
+    original_ime = current_ime(serial)
+    try:
+        root = dump_ui(serial)
+        editor_done = find_node(root, texts=("完成",))
+        if editor_done is not None:
+            tap_node(serial, editor_done)
+            time.sleep(0.6)
+
+        run_adb(serial, "shell", "ime", "enable", ADB_IME)
+        run_adb(serial, "shell", "ime", "set", ADB_IME)
+        move_body_cursor_to_end(serial)
+        for topic in cleaned:
+            topic_entry = wait_node(serial, texts=("话题",), timeout=8)
+            tap_node(serial, topic_entry)
+            time.sleep(0.6)
+
+            root = dump_ui(serial)
+            candidate = topic_candidate(root, topic)
+            if candidate is None:
+                body = next((
+                    node for node in root.iter("node")
+                    if node.attrib.get("class", "").endswith("EditText")
+                    and node.attrib.get("hint", "").startswith("添加正文")
+                ), None)
+                if body is None:
+                    raise SystemExit(f"无法输入小红书话题：{topic}；已中止发布")
+                broadcast_unicode(serial, topic)
+                candidate, root = wait_topic_candidate(serial, topic)
+            if candidate is None:
+                body = next((
+                    node for node in root.iter("node")
+                    if node.attrib.get("class", "").endswith("EditText")
+                    and node.attrib.get("hint", "").startswith("添加正文")
+                ), None)
+                if body is not None and body.attrib.get("text", "").endswith(f"#{topic}"):
+                    run_adb(serial, "shell", "input", "keyevent", *(["67"] * (len(topic) + 1)))
+                run_adb(serial, "shell", "input", "keyevent", "111", check=False)
+                time.sleep(0.5)
+                root = dump_ui(serial)
+                editor_done = find_node(root, texts=("完成",))
+                if editor_done is not None:
+                    tap_node(serial, editor_done)
+                    time.sleep(0.5)
+                skipped.append(topic)
+                _log(f"[话题] 未找到精确候选，已跳过：{topic}")
+                continue
+
+            tap_node(serial, candidate)
+            return_control = wait_node(serial, texts=("完成", "话题"), timeout=8)
+            if return_control.attrib.get("text") == "完成":
+                tap_node(serial, return_control)
+            time.sleep(0.6)
+            bound.append(topic)
+    finally:
+        if original_ime and original_ime != "null":
+            run_adb(serial, "shell", "ime", "set", original_ime, check=False)
+        run_adb(serial, "shell", "input", "keyevent", "111", check=False)
+    return {"bound": bound, "skipped": skipped}
+
+
 def attach_product(serial: str, product_keyword: str) -> None:
     """Attach one exact product or fail closed before the publish tap."""
     keyword = product_keyword.strip()
     if not keyword:
         return
-    root = dump_ui(serial)
-    entry = find_node(
-        root,
+    # Close any lingering editor keyboard first. On some builds the keyboard
+    # changes the compose scroll offset and hides the component row.
+    run_adb(serial, "shell", "input", "keyevent", "111", check=False)
+    time.sleep(0.5)
+    entry = scroll_to_find_node(
+        serial,
         texts=("添加商品", "关联商品", "商品"),
-        descriptions=("添加商品", "关联商品"),
+        descriptions=("添加商品", "关联商品", "商品"),
+        max_scrolls=12,
     )
     if entry is None:
-        component_entry = find_node(root, texts=("添加组件",), descriptions=("添加组件",))
+        component_entry = scroll_to_find_node(
+            serial,
+            texts=("添加组件",),
+            descriptions=("添加组件",),
+            max_scrolls=12,
+        )
         if component_entry is not None:
             tap_node(serial, component_entry)
             time.sleep(0.8)
-            root = dump_ui(serial)
-            entry = find_node(root, texts=("商品",), descriptions=("商品",))
+            # The component sheet is itself a scrollable list. Current XHS
+            # builds expose the row as content-desc="商品" with no text.
+            entry = scroll_to_find_node(
+                serial,
+                texts=("添加商品", "关联商品", "商品"),
+                descriptions=("添加商品", "关联商品", "商品"),
+                max_scrolls=12,
+            )
     if entry is None:
         raise SystemExit("找不到“添加商品”入口，已中止发布，不会跳过挂车")
     tap_node(serial, entry)
     time.sleep(1.5)
     root = dump_ui(serial)
-    search = next((
-        node for node in root.iter("node")
-        if node.attrib.get("class", "").endswith("EditText")
-        and "搜索" in (node.attrib.get("text", "") + node.attrib.get("hint", "") + node.attrib.get("content-desc", ""))
-    ), None)
+    search = product_search_control(root)
     if search is None:
-        # XHS 9.40 exposes the search affordance as an unlabeled clickable
-        # ImageView to the right of the product category tabs.
-        search_icon = next((
-            node for node in root.iter("node")
-            if node.attrib.get("class", "").endswith("ImageView")
-            and node.attrib.get("clickable") == "true"
-            and (lambda b: b[0] >= 900 and 240 <= b[1] <= 420)(
-                tuple(int(v) for v in node.attrib.get("bounds", "[0,0][0,0]").replace("][", ",").strip("[]").split(","))
-            )
-        ), None)
-        if search_icon is None:
-            raise SystemExit("找不到商品搜索入口，已中止发布")
-        tap_node(serial, search_icon)
+        raise SystemExit("找不到商品搜索入口，已中止发布")
+    if not search.attrib.get("class", "").endswith("EditText"):
+        tap_node(serial, search)
         time.sleep(1)
         root = dump_ui(serial)
         search = next((
@@ -507,31 +826,474 @@ def attach_product(serial: str, product_keyword: str) -> None:
     finally:
         if original_ime and original_ime != "null":
             run_adb(serial, "shell", "ime", "set", original_ime, check=False)
-    root = dump_ui(serial)
-    exact = next((node for node in root.iter("node") if node.attrib.get("text", "").strip() == keyword), None)
-    if exact is None:
-        raise SystemExit(f"未找到精确匹配的挂车商品：{keyword}；已中止发布")
-    exact_bounds = tuple(int(v) for v in exact.attrib["bounds"].replace("][", ",").strip("[]").split(","))
-    containers = []
-    for node in root.iter("node"):
-        if node.attrib.get("clickable") != "true" or "bounds" not in node.attrib:
-            continue
-        bounds = tuple(int(v) for v in node.attrib["bounds"].replace("][", ",").strip("[]").split(","))
-        if bounds[0] <= exact_bounds[0] and bounds[1] <= exact_bounds[1] and bounds[2] >= exact_bounds[2] and bounds[3] >= exact_bounds[3]:
-            containers.append((max(1, (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])), bounds))
-    if not containers:
+    run_adb(serial, "shell", "input", "keyevent", "111", check=False)
+    time.sleep(0.5)
+    product, root = scroll_to_find_product_result(serial, keyword)
+    if product is None:
+        raise SystemExit(f"未找到匹配的挂车商品：{keyword}；已中止发布")
+    container = clickable_ancestor(root, product)
+    if container is None:
         raise SystemExit(f"无法定位商品勾选圆圈：{keyword}；已中止发布")
-    _, product_bounds = min(containers, key=lambda item: item[0])
-    run_adb(serial, "shell", "input", "tap", str(product_bounds[0] + 60), str((product_bounds[1] + product_bounds[3]) // 2))
+    container_bounds = tuple(
+        int(value)
+        for value in container.attrib["bounds"].replace("][", ",").strip("[]").split(",")
+    )
+    run_adb(serial, "shell", "input", "tap", str(container_bounds[0] + 60), str((container_bounds[1] + container_bounds[3]) // 2))
     time.sleep(1.2)
     root = dump_ui(serial)
-    confirm = find_node(root, texts=("确认添加", "完成", "添加"))
-    if confirm is not None:
-        tap_node(serial, confirm)
+
+    variant_confirm = find_node(root, texts=("确认并返回",))
+    if variant_confirm is not None:
+        tap_node(serial, variant_confirm)
+        time.sleep(1.2)
+        run_adb(serial, "shell", "input", "keyevent", "111", check=False)
+        time.sleep(0.5)
+        root = dump_ui(serial)
+
+    selection_confirm = find_node(root, texts=("确认(", "确认添加"))
+    if selection_confirm is not None:
+        tap_node(serial, selection_confirm)
         time.sleep(1.5)
+        root = dump_ui(serial)
+
+    # Different XHS builds use different labels for the selected-product
+    # counter and for the compose-page publish button.  Do not rely on one
+    # exact string or on a single 1-second sleep here: the product sheet is
+    # animated and its UI tree is often one or two dumps behind the screen.
+    attached_count = _selected_product_marker(root)
+    # 挂车确认后新版会先回到“添加组件”底部面板，再回到编辑正文页。
+    # 该面板同样包含“商品/文件/活动”，不能仅凭工具栏文字判定已回编辑页。
     root = dump_ui(serial)
-    if find_node(root, texts=(keyword,)) is None:
-        raise SystemExit(f"商品未在发布页确认显示：{keyword}；已中止发布")
+    for _ in range(3):
+        if _is_compose_page(root) and not _is_component_sheet(root):
+            break
+        run_adb(serial, "shell", "input", "keyevent", "4", check=False)
+        time.sleep(0.7)
+        root = dump_ui(serial)
+    if not _is_compose_page(root) or _is_component_sheet(root):
+        visible = sorted({
+            (node.attrib.get("text", "") or node.attrib.get("content-desc", "")).strip()
+            for node in dump_ui(serial).iter("node")
+            if (node.attrib.get("text", "") or node.attrib.get("content-desc", "")).strip()
+        })
+        raise SystemExit(
+            f"商品已选择但未返回发布页：{keyword}；已中止发布。"
+            f" 当前可见控件：{visible[:30]}"
+        )
+    # The compose screen is vertically scrollable.  After returning from the
+    # product sheet some builds leave us near the bottom (showing 商品/文件/
+    # 活动 but hiding the top 发布 button).  Restore the top before the caller
+    # performs the final publish-button lookup.
+    _scroll_compose_to_top(serial, root)
+
+
+def _is_publish_page(root: ET.Element) -> bool:
+    """Recognize the compose page across XHS label/resource-id variants."""
+    for node in root.iter("node"):
+        text = (node.attrib.get("text", "") or "").strip()
+        description = (node.attrib.get("content-desc", "") or "").strip()
+        resource_id = node.attrib.get("resource-id", "")
+        if resource_id == "com.xingin.xhs:id/a5t":
+            return True
+        # Some builds expose the label on a non-clickable child while the
+        # parent owns the actual tap target.
+        if text in {"发布", "发布笔记"} or text.startswith("发布笔记"):
+            return True
+        if description in {"发布", "发布笔记"} or description.startswith("发布笔记"):
+            return True
+    # On the affected builds the publish button is above the current viewport
+    # and is absent from the dump.  The compose toolbar still exposes several
+    # stable actions; two or more together are sufficient to identify it and
+    # are unlikely to occur in the product picker.
+    compose_markers = {"商品", "引用笔记", "文件", "活动", "添加标题", "添加正文"}
+    visible_markers = {
+        (node.attrib.get("text", "") or node.attrib.get("content-desc", "")).strip()
+        for node in root.iter("node")
+    }
+    if len(compose_markers & visible_markers) >= 2:
+        return True
+    return False
+
+
+def _find_publish_button(root: ET.Element, *, scheduled: bool = False) -> ET.Element | None:
+    """Locate the page-level publish action across XHS label variants."""
+    labels = {"发布", "发布笔记", "发笔记"}
+    if scheduled:
+        labels.add("定时发布")
+    candidates = [
+        node for node in root.iter("node")
+        if (
+            node.attrib.get("text") in labels
+            or node.attrib.get("content-desc") in labels
+            or node.attrib.get("resource-id") == "com.xingin.xhs:id/a5t"
+        )
+    ]
+    return candidates[-1] if candidates else None
+
+
+def _is_compose_page(root: ET.Element) -> bool:
+    """Recognize the editor before its final 发布 button is visible."""
+    ids = {"com.xingin.xhs:id/b5i", "com.xingin.xhs:id/b4d"}
+    has_title_or_body = any(
+        node.attrib.get("resource-id") in ids
+        or node.attrib.get("hint", "").startswith(("添加标题", "添加正文"))
+        for node in root.iter("node")
+    )
+    toolbar = {"商品", "引用笔记", "文件", "活动", "添加"}
+    labels = {
+        (node.attrib.get("text", "") or node.attrib.get("content-desc", "")).strip()
+        for node in root.iter("node")
+    }
+    return has_title_or_body or len(toolbar & labels) >= 2
+
+
+def _is_component_sheet(root: ET.Element) -> bool:
+    """Recognize the post-product "添加组件" bottom sheet.
+
+    It reuses the same toolbar labels as the editor, but is anchored at the
+    bottom of the screen and has no title/body editor fields.
+    """
+    labels = {
+        (node.attrib.get("text", "") or node.attrib.get("content-desc", "")).strip()
+        for node in root.iter("node")
+    }
+    if not {"商品", "文件", "引用笔记", "活动"}.issubset(labels):
+        return False
+    if any(
+        node.attrib.get("resource-id") in {"com.xingin.xhs:id/b5i", "com.xingin.xhs:id/b4d"}
+        or node.attrib.get("hint", "").startswith(("添加标题", "添加正文"))
+        for node in root.iter("node")
+    ):
+        return False
+    for node in root.iter("node"):
+        if node.attrib.get("class") != "android.widget.ScrollView":
+            continue
+        try:
+            _, top, _, _ = (
+                int(value)
+                for value in node.attrib["bounds"].replace("][", ",").strip("[]").split(",")
+            )
+        except (KeyError, ValueError):
+            continue
+        if top >= 850:
+            return True
+    return False
+
+
+def _selected_product_marker(root: ET.Element) -> ET.Element | None:
+    """Find selected-product counters used by different product-sheet builds."""
+    markers = ("件商品", "商品已选", "已选商品", "商品(")
+    for node in root.iter("node"):
+        label = " ".join((node.attrib.get("text", ""), node.attrib.get("content-desc", ""))).strip()
+        if any(marker in label for marker in markers):
+            return node
+    return None
+
+
+def _wait_for_publish_page(serial: str, *, timeout: float = 8.0) -> ET.Element | None:
+    """Wait for the compose page to settle after leaving the product sheet."""
+    deadline = time.time() + timeout
+    root = dump_ui(serial)
+    while time.time() < deadline:
+        if _is_publish_page(root):
+            return root
+        time.sleep(0.5)
+        root = dump_ui(serial)
+
+    # If the sheet is still open after its animation, one BACK returns to the
+    # compose page. Only do this when the tree still looks like the product
+    # picker; never press BACK blindly from an already-restored compose page.
+    # If the product sheet is still open, one final BACK returns to compose.
+    # Never press BACK from an unknown screen: that could leave the compose
+    # flow and make the next publish operate on the wrong page.
+    picker_open = (
+        product_search_control(root) is not None
+        or _selected_product_marker(root) is not None
+        or find_node(root, texts=("确认并返回", "确认添加")) is not None
+    )
+    if picker_open:
+        run_adb(serial, "shell", "input", "keyevent", "4", check=False)
+        deadline = time.time() + 4.0
+        while time.time() < deadline:
+            time.sleep(0.5)
+            root = dump_ui(serial)
+            if _is_publish_page(root):
+                return root
+    return None
+
+
+def _scroll_compose_to_top(serial: str, root: ET.Element) -> None:
+    """Best-effort scroll to the top of the compose page after product attach."""
+    for _ in range(4):
+        container = _scrollable_node(root)
+        if container is None:
+            return
+        try:
+            left, top, right, bottom = (
+                int(value)
+                for value in container.attrib["bounds"].replace("][", ",").strip("[]").split(",")
+            )
+        except (KeyError, ValueError):
+            return
+        mid_x = (left + right) // 2
+        run_adb(
+            serial, "shell", "input", "swipe",
+            str(mid_x), str(bottom - 80), str(mid_x), str(top + 80), "450",
+            check=False,
+        )
+        time.sleep(0.45)
+        root = dump_ui(serial)
+
+
+def _fill_edit_text(serial: str, node: ET.Element, value: str) -> None:
+    """Replace one native text field while preserving Chinese/date separators."""
+    tap_node(serial, node)
+    run_adb(serial, "shell", "input", "keyevent", "123")
+    run_adb(serial, "shell", "input", "keyevent", *( ["67"] * 80 ))
+    broadcast_unicode(serial, value)
+
+
+def _select_schedule_wheel(
+    serial: str,
+    root: ET.Element,
+    value: str,
+    wheel_index: int,
+    *,
+    date_value: bool = False,
+) -> ET.Element:
+    """Select one visible item from the current date/time wheel."""
+    def ordered_wheels(current_root: ET.Element) -> list[ET.Element]:
+        wheels = [
+            node for node in current_root.iter("node")
+            if node.attrib.get("class") == "android.widget.ScrollView"
+            and node.attrib.get("scrollable") == "true"
+        ]
+        # XML child order is not stable after a wheel is tapped. The three
+        # columns are stable by horizontal position: date, hour, minute.
+        return sorted(
+            wheels,
+            key=lambda node: int(
+                node.attrib["bounds"].replace("][", ",").strip("[]").split(",")[0]
+            ),
+        )
+
+    wheels = ordered_wheels(root)
+    if wheel_index >= len(wheels):
+        raise SystemExit("手机定时面板滚轮数量异常，已中止发布")
+    wheel = wheels[wheel_index]
+    left, top, right, bottom = (
+        int(item)
+        for item in wheel.attrib["bounds"].replace("][", ",").strip("[]").split(",")
+    )
+
+    def number(text: str) -> int | None:
+        if date_value:
+            match = re.search(r"(\d{1,2})月(\d{1,2})日", text)
+            return int(match.group(2)) if match else None
+        return int(text) if text.isdigit() else None
+
+    target_number = number(value)
+    # 目标可能先以裁切行出现；按约一行的距离小步调整，每一步都重新
+    # dump 并确认目标进入有效 bounds，避免一次大手势把目标滑过去。
+    for _ in range(60):
+        candidates = []
+        for node in root.iter("node"):
+            text = node.attrib.get("text", "").strip()
+            if (value not in text if date_value else text != value):
+                continue
+            clickable = clickable_ancestor(root, node)
+            action_node = clickable if clickable is not None else node
+            bounds = node.attrib.get("bounds", "")
+            try:
+                x1, y1, x2, y2 = (
+                    int(item) for item in bounds.replace("][", ",").strip("[]").split(",")
+                )
+            except (ValueError, AttributeError):
+                continue
+            try:
+                ax1, ay1, ax2, ay2 = (
+                    int(item)
+                    for item in action_node.attrib.get("bounds", "").replace("][", ",").strip("[]").split(",")
+                )
+            except (ValueError, AttributeError):
+                ax1 = ay1 = ax2 = ay2 = 0
+            # Prefer the clickable row's bounds. The child TextView often has
+            # an inverted clipped rectangle while its parent row is valid.
+            if ax2 > ax1 and ay2 > ay1 and ax2 > left and ax1 < right and ay2 > top and ay1 < bottom:
+                return action_node
+            # If there is no usable clickable wrapper, accept only a valid
+            # visible text rectangle; never tap an inverted residual node.
+            if not (x2 > x1 and y2 > y1 and x2 > left and x1 < right):
+                continue
+            intersects = x2 > left and x1 < right and y2 > top and y1 < bottom
+            if intersects:
+                candidates.append(node)
+        if candidates:
+            selected = candidates[0]
+            clickable = clickable_ancestor(root, selected)
+            # Element 的 truth value 取决于子节点数量；可点击父节点常常
+            # 是叶节点，会被 Python 当成 False。必须显式判断 None，不能
+            # 使用 ``clickable or selected``，否则会退回到 bounds 异常的
+            # 文本节点，出现“看见了但点不到”。
+            if clickable is not None:
+                try:
+                    px1, py1, px2, py2 = (
+                        int(item)
+                        for item in clickable.attrib["bounds"].replace("][", ",").strip("[]").split(",")
+                    )
+                except (KeyError, ValueError):
+                    px1 = py1 = px2 = py2 = 0
+                # Some RN builds put an inverted bounds rectangle on the
+                # clickable wrapper while the TextView child has valid bounds.
+                # Never tap the wrapper in that case; use the visible text row.
+                if px2 > px1 and py2 > py1:
+                    return clickable
+            return selected
+
+        visible_numbers = []
+        for node in root.iter("node"):
+            n = number(node.attrib.get("text", "").strip())
+            if n is None:
+                continue
+            bounds = node.attrib.get("bounds", "")
+            try:
+                x1, y1, x2, y2 = (
+                    int(item) for item in bounds.replace("][", ",").strip("[]").split(",")
+                )
+            except (ValueError, AttributeError):
+                continue
+            center_y = (y1 + y2) // 2
+            if not (x2 > x1 and y2 > y1):
+                continue
+            intersects = x2 > left and x1 < right and y2 > top and y1 < bottom
+            if intersects:
+                visible_numbers.append(n)
+        # The selected wheel row is the item nearest the picker center line,
+        # not the middle item in XML order (the list may be rendered in a
+        # clipped/reordered sequence).
+        center_value = None
+        center_distance = None
+        for node in root.iter("node"):
+            n = number(node.attrib.get("text", "").strip())
+            if n is None:
+                continue
+            try:
+                x1, y1, x2, y2 = (
+                    int(item) for item in node.attrib.get("bounds", "").replace("][", ",").strip("[]").split(",")
+                )
+            except (ValueError, AttributeError):
+                continue
+            if not (x2 > x1 and y2 > y1 and x2 > left and x1 < right and y2 > top and y1 < bottom):
+                continue
+            distance = abs(((y1 + y2) // 2) - ((top + bottom) // 2))
+            if center_distance is None or distance < center_distance:
+                center_value, center_distance = n, distance
+        need_increase = target_number is not None and center_value is not None and target_number > center_value
+        # Finger-up moves the wheel toward larger values; finger-down moves
+        # toward smaller values.
+        step = 85
+        start_y = (top + bottom) // 2 + step if need_increase else (top + bottom) // 2 - step
+        end_y = (top + bottom) // 2 - step if need_increase else (top + bottom) // 2 + step
+        run_adb(
+            serial, "shell", "input", "swipe", str((left + right) // 2),
+            str(start_y), str((left + right) // 2), str(end_y), "320", check=False,
+        )
+        time.sleep(0.4)
+        root = dump_ui(serial)
+        wheels = ordered_wheels(root)
+        if wheel_index >= len(wheels):
+            raise SystemExit("手机定时面板滚轮数量异常，已中止发布")
+        wheel = wheels[wheel_index]
+        left, top, right, bottom = (
+            int(item)
+            for item in wheel.attrib["bounds"].replace("][", ",").strip("[]").split(",")
+        )
+    raise SystemExit(f"手机定时面板找不到目标时间项：{value}")
+
+
+def schedule_on_phone(serial: str, scheduled_at: str) -> None:
+    """Submit a schedule to XHS itself, instead of relying on our scheduler.
+
+    XHS has shipped several variants of the More/定时发布 sheet.  We only
+    continue when the sheet exposes semantic controls and editable date/time
+    fields; otherwise we fail closed rather than accidentally publishing now.
+    """
+    try:
+        target = datetime.fromisoformat(scheduled_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SystemExit(f"无法解析手机定时发布时间：{scheduled_at}") from exc
+    root = dump_ui(serial)
+    # 新版编辑页从“高级选项”进入底部选项面板，面板里直接有
+    # “定时发布”；旧版仍可能暴露名为“更多”的入口。
+    schedule_entry = find_node(
+        root,
+        texts=("定时发布", "定时"),
+        descriptions=("定时发布", "定时"),
+    )
+    if schedule_entry is None:
+        entry = find_node(root, texts=("更多", "高级选项"), descriptions=("更多", "高级选项"))
+        if entry is None:
+            # attach_product restores the compose page to its top so the
+            # publish control is available. “高级选项” is lower down on
+            # current builds, so locate it with the compose scroll container.
+            entry = scroll_to_find_node(
+                serial,
+                texts=("更多", "高级选项"),
+                descriptions=("更多", "高级选项"),
+                max_scrolls=8,
+            )
+        if entry is not None:
+            tap_node(serial, entry)
+            time.sleep(0.8)
+            root = dump_ui(serial)
+            schedule_entry = find_node(root, texts=("定时发布", "定时"), descriptions=("定时发布", "定时"))
+    if schedule_entry is None:
+        raise SystemExit("发布选项中找不到“定时发布”，已中止发布")
+    tap_node(serial, schedule_entry)
+    time.sleep(1.2)
+    root = dump_ui(serial)
+
+    date_text = target.strftime("%Y-%m-%d")
+    time_text = target.strftime("%H:%M")
+    edit_fields = [
+        node for node in root.iter("node")
+        if node.attrib.get("class", "").endswith("EditText")
+    ]
+    date_field = next((node for node in edit_fields if any(token in (node.attrib.get("hint", "") + node.attrib.get("text", "")) for token in ("日期", "年", "月", "日"))), None)
+    time_field = next((node for node in edit_fields if any(token in (node.attrib.get("hint", "") + node.attrib.get("text", "")) for token in ("时间", "时", "分"))), None)
+    if date_field is not None and time_field is not None:
+        _fill_edit_text(serial, date_field, date_text)
+        _fill_edit_text(serial, time_field, time_text)
+    else:
+        # 当前版本使用三个滚轮而非 EditText：日期（如“9月5日 周六”）、
+        # 小时（“05”）和分钟（“00”）。目标日期通常在可见窗口内；
+        # 不猜坐标，按 UI 文本定位后点击其可点击父节点。
+        date_value = f"{target.month}月{target.day}日"
+        for index, value, is_date in (
+            (0, date_value, True),
+            (1, target.strftime("%H"), False),
+            (2, target.strftime("%M"), False),
+        ):
+            node = _select_schedule_wheel(serial, root, value, index, date_value=is_date)
+            tap_node(serial, node)
+            time.sleep(0.3)
+            root = dump_ui(serial)
+    run_adb(serial, "shell", "input", "keyevent", "111", check=False)
+    time.sleep(0.5)
+    root = dump_ui(serial)
+    confirm = find_node(root, texts=("完成", "确定", "保存", "确认"), descriptions=("完成", "确定", "保存", "确认"))
+    if confirm is None:
+        raise SystemExit("手机定时面板找不到确认按钮，已中止发布")
+    tap_node(serial, confirm)
+    # 当前版本确认后会先回到“添加组件/高级选项”面板；该面板也有
+    # “商品/文件/活动”文字，必须再返回一次才是真正的正文编辑页。
+    for _ in range(4):
+        time.sleep(0.7)
+        root = dump_ui(serial)
+        if _is_compose_page(root) and not _is_component_sheet(root):
+            return
+        run_adb(serial, "shell", "input", "keyevent", "4", check=False)
+    raise SystemExit("手机定时设置后未返回正文编辑页，已中止发布")
 
 
 def command_devices(_: argparse.Namespace) -> None:
@@ -540,7 +1302,8 @@ def command_devices(_: argparse.Namespace) -> None:
 
 def command_doctor(args: argparse.Namespace) -> None:
     require_serial(args.serial)
-    packages = run_adb(args.serial, "shell", "pm", "list", "packages", XHS_PACKAGE).stdout
+    android_user = getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER
+    packages = run_adb(args.serial, "shell", "pm", "list", "packages", "--user", android_user, XHS_PACKAGE).stdout
     package_dump = run_adb(
         args.serial, "shell", "dumpsys", "package", XHS_PACKAGE
     ).stdout
@@ -551,6 +1314,7 @@ def command_doctor(args: argparse.Namespace) -> None:
             break
     record = {
         "serial": args.serial,
+        "android_user": android_user,
         "manufacturer": getprop(args.serial, "ro.product.manufacturer"),
         "model": getprop(args.serial, "ro.product.model"),
         "android": getprop(args.serial, "ro.build.version.release"),
@@ -643,17 +1407,9 @@ def command_push(args: argparse.Namespace) -> None:
 
 def command_open(args: argparse.Namespace) -> None:
     require_serial(args.serial)
-    run_adb(
-        args.serial,
-        "shell",
-        "monkey",
-        "-p",
-        XHS_PACKAGE,
-        "-c",
-        "android.intent.category.LAUNCHER",
-        "1",
-        capture=True,
-    )
+    android_user = getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER
+    run_adb(args.serial, "shell", "am", "force-stop", "--user", android_user, XHS_PACKAGE)
+    run_adb(args.serial, "shell", "am", "start", "--user", android_user, "-n", f"{XHS_PACKAGE}/.index.v2.IndexActivityV2", capture=True)
 
 
 def command_calibrate(args: argparse.Namespace) -> None:
@@ -666,7 +1422,7 @@ def command_calibrate(args: argparse.Namespace) -> None:
         raise SystemExit(
             "Device rejects ADB input. Enable USB调试（安全设置） and reconnect."
         ) from exc
-    root = enter_gallery(args.serial)
+    root = enter_gallery(args.serial, getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER)
     thumbnails = selectable_thumbnails(root)
     if not thumbnails:
         raise SystemExit("Device calibration reached CodexXHS but found no selectable image")
@@ -698,7 +1454,8 @@ def command_fill(args: argparse.Namespace) -> None:
     title = Path(args.title_file).read_text(encoding="utf-8").strip()
     body = Path(args.body_file).read_text(encoding="utf-8").strip()
     fill_title_body(args.serial, title, body)
-    print("Filled title/body and restored the original input method.")
+    topic_result = attach_topics(args.serial, topics_from_file(args.topics_file))
+    print(json.dumps({"status": "filled", "topics": topic_result}, ensure_ascii=False))
 
 
 def _match_thumbnails_to_order(
@@ -745,10 +1502,11 @@ def command_publish(args: argparse.Namespace) -> None:
         raise SystemExit("image-count must be between 1 and 9")
     title = Path(args.title_file).read_text(encoding="utf-8").strip()
     body = Path(args.body_file).read_text(encoding="utf-8").strip()
+    topics = topics_from_file(args.topics_file)
     if not title:
         raise SystemExit("Title cannot be empty")
 
-    root = enter_gallery(args.serial)
+    root = enter_gallery(args.serial, getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER)
 
     # The app-specific album is cleared before every run and contains only the
     # exact ordered payload for this job.
@@ -771,24 +1529,29 @@ def command_publish(args: argparse.Namespace) -> None:
         tap_thumbnail_selector(args.serial, node)
         time.sleep(0.3)
 
-    # The gallery must still be visible after all taps. If a single-photo
-    # picker jumped directly to editing, stop before filling/publishing.
+    # The gallery normally stays in multi-select mode until 下一步.  Some XHS
+    # builds auto-open the editor immediately after selecting the only image;
+    # in that case there is no 下一步 button, but the compose page is already
+    # ready for filling.  Accept that path only for a one-image job and only
+    # when the compose screen can be positively identified.
     root = dump_ui(args.serial)
     next_button = find_node(root, descriptions=("下一步",), texts=("下一步",))
     if next_button is None:
-        raise SystemExit(
-            f"未能以多选模式选中 {args.image_count} 张图片，已中止发布"
+        if args.image_count != 1 or not _is_compose_page(root):
+            raise SystemExit(
+                f"未能以多选模式选中 {args.image_count} 张图片，已中止发布"
+            )
+        _log("[选图] 单图已自动进入编辑页，跳过下一步")
+    else:
+        tap_node(args.serial, next_button)
+        time.sleep(2)
+        done = wait_node(
+            args.serial,
+            descriptions=("完成", "下一步"),
+            texts=("完成", "下一步"),
         )
-
-    tap_node(args.serial, next_button)
-    time.sleep(2)
-    done = wait_node(
-        args.serial,
-        descriptions=("完成", "下一步"),
-        texts=("完成", "下一步"),
-    )
-    tap_node(args.serial, done)
-    time.sleep(3)
+        tap_node(args.serial, done)
+        time.sleep(3)
 
     root = dump_ui(args.serial)
     recommendation_dialog = find_node(
@@ -821,20 +1584,18 @@ def command_publish(args: argparse.Namespace) -> None:
         tap_node(args.serial, editor_done)
         time.sleep(1)
         root = dump_ui(args.serial)
+    topic_result = attach_topics(args.serial, topics)
     attach_product(args.serial, args.product_keyword or "")
+    if args.scheduled_at:
+        schedule_on_phone(args.serial, args.scheduled_at)
     root = dump_ui(args.serial)
-    publish_candidates = [
-        node for node in root.iter("node")
-        if (
-            node.attrib.get("text") in {"发布", "发布笔记"}
-            or node.attrib.get("content-desc") == "发布"
-            or node.attrib.get("resource-id") == "com.xingin.xhs:id/a5t"
-        )
-        and node.attrib.get("clickable") == "true"
-    ]
-    publish_button = publish_candidates[-1] if publish_candidates else None
+    publish_button = _find_publish_button(root, scheduled=bool(args.scheduled_at))
     if publish_button is None:
         raise SystemExit("Publish button is not present after filling the reviewed payload")
+    if publish_button.attrib.get("clickable") != "true":
+        clickable = clickable_ancestor(root, publish_button)
+        if clickable is not None:
+            publish_button = clickable
     tap_node(args.serial, publish_button)
     deadline = time.time() + 30
     while time.time() < deadline:
@@ -842,28 +1603,31 @@ def command_publish(args: argparse.Namespace) -> None:
         root = dump_ui(args.serial)
         success_marker = find_node(
             root,
-            texts=("发布成功", "发布中", "发布完成", "审核中", "正在发布"),
-            descriptions=("发布成功", "发布中", "发布完成", "审核中", "正在发布"),
+            texts=("发布成功", "发布中", "发布完成", "审核中", "正在发布", "已定时", "定时发布成功"),
+            descriptions=("发布成功", "发布中", "发布完成", "审核中", "正在发布", "已定时", "定时发布成功"),
         )
         if success_marker is not None:
-            print(json.dumps({"status": "published", "image_count": args.image_count, "signal": success_marker.attrib.get("text") or success_marker.attrib.get("content-desc")}, ensure_ascii=False))
+            signal = success_marker.attrib.get("text") or success_marker.attrib.get("content-desc") or ""
+            scheduled = bool(args.scheduled_at) or "定时" in signal
+            print(json.dumps({"status": "scheduled" if scheduled else "published", "image_count": args.image_count, "signal": signal, "topics": topic_result}, ensure_ascii=False))
             return
         title_field = find_node(
             root,
             texts=("添加标题",),
             resource_ids=("com.xingin.xhs:id/b5i",),
         )
+        publish_texts = ("发布笔记", "发笔记", "定时发布") if args.scheduled_at else ("发布笔记", "发笔记")
         publish_control = find_node(
             root,
-            texts=("发布笔记",),
-            descriptions=("发布",),
+            texts=publish_texts,
+            descriptions=("发布", "定时发布") if args.scheduled_at else ("发布",),
             resource_ids=("com.xingin.xhs:id/a5t",),
         )
         if title_field is None and publish_control is None:
             break
     else:
         raise SystemExit("Xiaohongshu publish result requires verification after tapping 发布笔记")
-    print(json.dumps({"status": "published", "image_count": args.image_count}, ensure_ascii=False))
+    print(json.dumps({"status": "scheduled" if args.scheduled_at else "published", "image_count": args.image_count, "topics": topic_result}, ensure_ascii=False))
 
 
 def command_screenshot(args: argparse.Namespace) -> None:
@@ -942,11 +1706,25 @@ def _note_candidates(root: ET.Element) -> list[dict[str, object]]:
             "views": _number_from_text((re.search(r"(\d+(?:\.\d+)?[万wW]?)阅读", text) or [None, "0"])[1]),
             "media_type": "video" if text.startswith("视频") else "image",
             "accessibility_text": text,
+            "stable_key": re.sub(r"\s+", " ", title).strip()[:200],
         })
     unique: dict[str, dict[str, object]] = {}
     for item in found:
-        unique.setdefault(str(item["title"]), item)
+        unique.setdefault(str(item.get("stable_key") or item["title"]), item)
     return list(unique.values())
+
+
+def _write_scan_checkpoint(path_text: str, payload: dict[str, object]) -> None:
+    if not path_text:
+        return
+    path = Path(path_text)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        temporary.replace(path)
+    except OSError:
+        pass
 
 
 def command_scan_profile(args: argparse.Namespace) -> None:
@@ -971,41 +1749,107 @@ def command_scan_profile(args: argparse.Namespace) -> None:
         tap_node(args.serial, mine)
         time.sleep(2)
     # Profile tabs remember their previous scroll offset. Always restore the
-    # top before reading account identity and totals.
-    for _ in range(3):
-        run_adb(args.serial, "shell", "input", "swipe", "540", "650", "540", "2100", "450", check=False)
-        time.sleep(0.4)
+    # top before reading account identity and totals. Use the actual notes
+    # container bounds; hardcoded coordinates can fall outside smaller screens.
+    if not args.identity_only:
+        for _ in range(3):
+            root = dump_ui(args.serial)
+            if not _swipe_scrollable_container(args.serial, root, direction="down", duration_ms=450):
+                break
+            time.sleep(0.4)
     root = dump_ui(args.serial)
     initial_values = _visible_strings(root)
-    if not any("粉丝" in value or "获赞与收藏" in value for value in initial_values):
+    if not args.identity_only and not any("粉丝" in value or "获赞与收藏" in value for value in initial_values):
         raise SystemExit("Xiaohongshu profile page is not readable; unlock/login and retry")
+    if args.identity_only:
+        metrics = _profile_metrics(initial_values)
+        red_id = next((value.split("：", 1)[-1].strip() for value in initial_values if "小红书号" in value), "")
+        excluded = {"关注", "粉丝", "获赞与收藏", "编辑资料", "笔记", "收藏", "赞过"}
+        avatar_label = next((value for value in initial_values if value.startswith("头像,")), "")
+        nickname = avatar_label.split(",", 1)[1].strip() if "," in avatar_label else next((
+            value for value in initial_values
+            if value not in excluded and 2 <= len(value) <= 40
+            and "小红书号" not in value and not value.startswith("头像,")
+            and not re.fullmatch(r"[\d.万wW]+", value)
+        ), "")
+        print(json.dumps({
+            "status": "scanned", "serial": args.serial,
+            "android_user": getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER,
+            "profile": {"nickname": nickname, "red_id": red_id, **metrics},
+            "notes": [], "visible_note_count": 0,
+            "expected_public_count": 0, "scroll_count": 0,
+            "end_reason": "identity_only",
+        }, ensure_ascii=False))
+        return
     public_match = next((re.search(r"公开\s*(\d+)", value) for value in initial_values if "公开" in value), None)
     expected_public = int(public_match.group(1)) if public_match else 0
     notes: dict[str, dict[str, object]] = {}
+    checkpoint_file = str(getattr(args, "checkpoint_file", "") or "")
+    if checkpoint_file:
+        try:
+            previous = json.loads(Path(checkpoint_file).read_text(encoding="utf-8"))
+            for item in previous.get("notes", []):
+                if isinstance(item, dict) and item.get("title"):
+                    notes[str(item.get("stable_key") or item["title"])] = item
+        except (OSError, json.JSONDecodeError):
+            pass
+    # Android UI dump can briefly expose the same rendered rows while the
+    # RecyclerView is loading the next batch. Five unchanged rounds (the old
+    # threshold) stopped large profiles far too early, sometimes after only
+    # a few dozen notes. Allow a longer settling window and rely on the hard
+    # scan limit when the app does not expose an exact end marker.
     stagnant_rounds = 0
-    scroll_count = 0
+    resume_scroll_count = max(0, int(getattr(args, "resume_scroll_count", 0) or 0))
+    scroll_count = resume_scroll_count
     end_reason = "max_scrolls"
+    max_notes = max(1, int(getattr(args, "max_notes", 500) or 500))
+    for _ in range(resume_scroll_count):
+        root = dump_ui(args.serial)
+        if not _swipe_scrollable_container(args.serial, root, direction="up"):
+            scroll_count = _
+            break
+        time.sleep(1.2)
     for index in range(max(1, args.max_scrolls + 1)):
         root = dump_ui(args.serial)
         before = len(notes)
         for item in _note_candidates(root):
-            notes.setdefault(str(item["title"]), item)
+            notes.setdefault(str(item.get("stable_key") or item["title"]), item)
         if len(notes) == before:
             stagnant_rounds += 1
         else:
             stagnant_rounds = 0
-        if expected_public and len(notes) >= expected_public:
-            end_reason = "expected_count_reached"
+        _write_scan_checkpoint(checkpoint_file, {
+            "status": "scanning", "serial": args.serial,
+            "android_user": getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER,
+            "notes": list(notes.values())[:max_notes], "visible_note_count": min(len(notes), max_notes),
+            "expected_public_count": expected_public, "scroll_count": scroll_count,
+            "end_reason": "in_progress",
+        })
+        if len(notes) >= max_notes:
+            end_reason = "max_notes_reached"
             break
-        if stagnant_rounds >= 5:
+        if stagnant_rounds >= 20:
             end_reason = "list_end_reached"
             break
         if index < args.max_scrolls:
-            run_adb(args.serial, "shell", "input", "swipe", "540", "1900", "540", "650", "650")
+            if not _swipe_scrollable_container(args.serial, root, direction="up"):
+                end_reason = "notes_container_not_found"
+                break
             scroll_count += 1
-            time.sleep(1.5)
+            _write_scan_checkpoint(checkpoint_file, {
+                "status": "scanning", "serial": args.serial,
+                "android_user": getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER,
+                "notes": list(notes.values())[:max_notes], "visible_note_count": min(len(notes), max_notes),
+                "expected_public_count": expected_public, "scroll_count": scroll_count,
+                "end_reason": "in_progress",
+            })
+            time.sleep(1.8)
     # Return to the top so a sync does not leave the user deep in the profile.
-    run_adb(args.serial, "shell", "input", "swipe", "540", "650", "540", "2050", "450", check=False)
+    for _ in range(3):
+        root = dump_ui(args.serial)
+        if not _swipe_scrollable_container(args.serial, root, direction="down", duration_ms=450):
+            break
+        time.sleep(0.4)
     profile_values = initial_values
     metrics = _profile_metrics(profile_values)
     red_id = next((value.split("：", 1)[-1].strip() for value in profile_values if "小红书号" in value), "")
@@ -1019,8 +1863,9 @@ def command_scan_profile(args: argparse.Namespace) -> None:
     ), "")
     print(json.dumps({
         "status": "scanned", "serial": args.serial,
+        "android_user": getattr(args, "android_user", DEFAULT_ANDROID_USER) or DEFAULT_ANDROID_USER,
         "profile": {"nickname": nickname, "red_id": red_id, **metrics},
-        "notes": list(notes.values()), "visible_note_count": len(notes),
+        "notes": list(notes.values())[:max_notes], "visible_note_count": min(len(notes), max_notes),
         "expected_public_count": expected_public, "scroll_count": scroll_count,
         "end_reason": end_reason,
     }, ensure_ascii=False))
@@ -1035,10 +1880,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor")
     doctor.add_argument("--serial", required=True)
+    doctor.add_argument("--android-user", default=DEFAULT_ANDROID_USER)
     doctor.set_defaults(func=command_doctor)
 
     calibrate = subparsers.add_parser("calibrate")
     calibrate.add_argument("--serial", required=True)
+    calibrate.add_argument("--android-user", default=DEFAULT_ANDROID_USER)
     calibrate.set_defaults(func=command_calibrate)
 
     install_ime = subparsers.add_parser("install-ime")
@@ -1057,12 +1904,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     open_app = subparsers.add_parser("open")
     open_app.add_argument("--serial", required=True)
+    open_app.add_argument("--android-user", default=DEFAULT_ANDROID_USER)
     open_app.set_defaults(func=command_open)
 
     fill = subparsers.add_parser("fill")
     fill.add_argument("--serial", required=True)
     fill.add_argument("--title-file", required=True)
     fill.add_argument("--body-file", required=True)
+    fill.add_argument("--topics-file")
+    fill.add_argument("--android-user", default=DEFAULT_ANDROID_USER)
     fill.set_defaults(func=command_fill)
 
     screenshot = subparsers.add_parser("screenshot")
@@ -1074,13 +1924,21 @@ def build_parser() -> argparse.ArgumentParser:
     publish.add_argument("--serial", required=True)
     publish.add_argument("--title-file", required=True)
     publish.add_argument("--body-file", required=True)
+    publish.add_argument("--topics-file")
     publish.add_argument("--image-count", required=True, type=int)
     publish.add_argument("--product-keyword", default="")
+    publish.add_argument("--scheduled-at", default="", help="让小红书手机端保存的定时发布时间，格式 YYYY-MM-DDTHH:MM")
+    publish.add_argument("--android-user", default=DEFAULT_ANDROID_USER)
     publish.set_defaults(func=command_publish)
 
     scan_profile = subparsers.add_parser("scan-profile")
     scan_profile.add_argument("--serial", required=True)
-    scan_profile.add_argument("--max-scrolls", type=int, default=120)
+    scan_profile.add_argument("--android-user", default=DEFAULT_ANDROID_USER)
+    scan_profile.add_argument("--max-scrolls", type=int, default=260)
+    scan_profile.add_argument("--max-notes", type=int, default=500)
+    scan_profile.add_argument("--checkpoint-file", default="")
+    scan_profile.add_argument("--resume-scroll-count", type=int, default=0)
+    scan_profile.add_argument("--identity-only", action="store_true", help="只读取账号身份，不读取笔记或滑动列表")
     scan_profile.set_defaults(func=command_scan_profile)
     return parser
 

@@ -41,7 +41,7 @@ function authErrorMessage(error: unknown, fallback: string): string {
   }
 
   if (!error.response) {
-    return "后端服务未启动或无法连接（请确认 http://127.0.0.1:8000 正在运行）。";
+    return "后端服务未启动或无法连接（请确认 XHS 服务已启动，并从同一局域网访问）。";
   }
 
   const detail = error.response?.data?.detail;

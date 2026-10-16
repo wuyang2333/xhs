@@ -102,7 +102,10 @@ class Settings(BaseSettings):
     server_port: int = 8000
 
     # CORS
-    backend_cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
+    # Allow the Vite dev server from localhost and the machine's LAN address.
+    # The frontend normally proxies /api, but explicit LAN origins also make
+    # direct backend access and token refresh work from another computer.
+    backend_cors_origins: str = "http://127.0.0.1:5173,http://localhost:5173,http://192.168.2.40:5173"
 
     # Scheduler
     scheduler_enabled: bool = False

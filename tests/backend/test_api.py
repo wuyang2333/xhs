@@ -159,6 +159,14 @@ def test_rewrite_page_preserves_mode_switch():
     assert "antd" in source
 
 
+def test_publish_page_loads_saved_products_and_allows_new_product_input():
+    source = open("frontend/src/pages/platforms/xhs/publish-page.tsx", encoding="utf-8").read()
+    assert "fetchProducts" in source
+    assert "createProduct" in source
+    assert "visibleProductOptions" in source
+    assert "暂无已保存商品，可直接输入新商品名称" in source
+
+
 def test_publish_page_uses_antd_components():
     source = open("frontend/src/pages/platforms/xhs/publish-page.tsx", encoding="utf-8").read()
 
@@ -6612,6 +6620,39 @@ def test_run_due_publish_jobs_for_all_users_executes_each_due_user(tmp_path):
             assert db.get(PublishJob, first_job_id).status == "published"
             assert db.get(PublishJob, second_job_id).status == "published"
             assert db.query(Task).filter(Task.task_type == "creator_publish_scheduler").count() == 2
+        finally:
+            db.close()
+    finally:
+        app.dependency_overrides.pop(db_dependency, None)
+
+
+def test_cookie_health_check_skips_android_accounts_without_web_cookies(tmp_path):
+    from backend.app.core.database import get_db
+    from backend.app.services.scheduler_service import _check_single_account
+    from backend.app.models import PlatformAccount
+
+    db_dependency = _override_database(tmp_path)
+    try:
+        db = next(app.dependency_overrides[get_db]())
+        try:
+            account = PlatformAccount(
+                user_id=1,
+                platform="xhs",
+                sub_type="android",
+                external_user_id="PHONE-SERIAL",
+                nickname="安卓账号",
+                status="expired",
+                status_message="No stored cookie version",
+            )
+            db.add(account)
+            db.commit()
+
+            before = account.updated_at
+            _check_single_account(db, account, datetime.utcnow())
+
+            assert account.status == "active"
+            assert "不使用网页 Cookie" in account.status_message
+            assert account.updated_at != before
         finally:
             db.close()
     finally:

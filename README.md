@@ -171,9 +171,16 @@ cd frontend && npm install && cd ..
 ### 启动项目
 
 ```bash
-# 一键启动（后端 + 前端）
-python main.py --with-frontend
+# Windows：双击统一管理入口
+XHS.bat
+
+# 命令行直接后台启动
+XHS.bat start
 ```
+
+启动后，局域网内其他电脑可访问 `http://主机IP:5173`（例如 `http://192.168.2.40:5173`）操作同一套系统。手机仍需通过 USB 连接在运行后端的主机上，发布动作由主机上的 ADB 执行。
+
+`XHS.bat` 同时提供后台启动、停止、状态检查和打开网页。启动成功后管理窗口可以关闭，不影响服务运行。
 
 启动后访问：
 - 前端: http://localhost:5173

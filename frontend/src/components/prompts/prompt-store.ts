@@ -14,6 +14,7 @@ export type PromptModule = "draft_studio" | "image_studio" | "auto_ops";
 const FAVORITES_KEY = "xhs.prompt.favorites";
 const RECENTS_KEY = "xhs.prompt.recents";
 const DEFAULTS_KEY = "xhs.prompt.defaults";
+const MATCH_CONTEXTS_KEY = "xhs.prompt.match-contexts";
 const RECENT_LIMIT = 8;
 
 function readJson<T>(key: string, fallback: T): T {
@@ -97,4 +98,34 @@ export function clearDefaultPrompt(module: PromptModule, promptType: string): vo
   const map = readAllDefaults();
   delete map[defaultsKey(module, promptType)];
   writeJson(DEFAULTS_KEY, map);
+}
+
+export type PromptMatchContext = {
+  productId: number | null;
+  sceneId: number | null;
+  scene: string;
+};
+
+const EMPTY_MATCH_CONTEXT: PromptMatchContext = { productId: null, sceneId: null, scene: "" };
+
+/** 匹配条件按使用入口和指令类型保存，返回页面后无需重复选择。 */
+export function readPromptMatchContext(module: PromptModule, promptType: string): PromptMatchContext {
+  const map = readJson<Record<string, Partial<PromptMatchContext>>>(MATCH_CONTEXTS_KEY, {});
+  const value = map[`${module}:${promptType}`];
+  if (value === null || typeof value !== "object") return { ...EMPTY_MATCH_CONTEXT };
+  return {
+    productId: typeof value.productId === "number" ? value.productId : null,
+    sceneId: typeof value.sceneId === "number" ? value.sceneId : null,
+    scene: typeof value.scene === "string" ? value.scene : "",
+  };
+}
+
+export function savePromptMatchContext(
+  module: PromptModule,
+  promptType: string,
+  value: PromptMatchContext,
+): void {
+  const map = readJson<Record<string, PromptMatchContext>>(MATCH_CONTEXTS_KEY, {});
+  map[`${module}:${promptType}`] = value;
+  writeJson(MATCH_CONTEXTS_KEY, map);
 }

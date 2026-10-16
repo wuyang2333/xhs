@@ -268,6 +268,9 @@ export function XhsAccountsPage() {
                         <Col span={12}>
                           <Statistic title={<span style={{ color: "rgba(255,255,255,0.45)", fontSize: 12 }}>设备</span>} value={profileValue(account, "model") || "已绑定"} valueStyle={{ color: "rgba(255,255,255,0.88)", fontSize: 14 }} />
                         </Col>
+                        <Col span={24}>
+                          <Text type="secondary" style={{ fontSize: 12 }}>分身空间：{profileValue(account, "android_user") === "999" ? "XSpace（用户 999）" : `主空间（用户 ${profileValue(account, "android_user") || "0"}）`}</Text>
+                        </Col>
                       </Row>
                     ) : isCreator ? (
                       <Row gutter={16} style={{ marginBottom: 12 }}>

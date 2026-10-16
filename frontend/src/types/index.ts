@@ -539,7 +539,13 @@ export type GenerateImagePayload = {
   prompt: string;
   model_config_id?: number;
   reference_images?: string[];
+  size?: string;
   save_to_assets?: boolean;
+};
+
+export type AndroidUserSpace = {
+  id: string;
+  name: string;
 };
 
 export type GenerateImageResult = {
@@ -720,7 +726,7 @@ export type PublishJob = {
   body: string;
   publish_mode: "immediate" | "scheduled" | string;
   publish_options?: PublishOptions;
-  status: "pending" | "uploading" | "publishing" | "scheduled" | "published" | "failed" | "cancelled" | string;
+  status: "pending" | "queued" | "uploading" | "publishing" | "scheduled" | "published" | "failed" | "cancelled" | string;
   scheduled_at?: string | null;
   external_note_id: string;
   publish_error: string;
@@ -905,6 +911,25 @@ export type OperationProfile = {
   status: "active" | "paused"; created_at: string; updated_at: string;
 };
 
+export type AccountOperationSummary = {
+  account: Pick<PlatformAccount, "id" | "nickname" | "sub_type" | "status">;
+  sync: {
+    note_count: number; status?: string; started_at?: string | null; finished_at?: string | null;
+    error?: string; total?: number; remote_saved?: number; system_saved?: number; analysis_proposal_id?: number | null;
+    target_count?: number; scanned_count?: number; scroll_count?: number; end_reason?: string;
+    sync_mode?: "quick" | "full" | "rebuild" | string;
+  };
+  analysis: {
+    latest_proposal?: StrategyProposal | null;
+    model?: { id: number; name: string; model_name: string } | null;
+  };
+  profile?: OperationProfile | null;
+  execution: {
+    today_plan_count: number; auto_task_count: number; auto_task_active_count: number; auto_task_paused_count: number;
+  };
+  task?: TaskRecord | null;
+};
+
 export type AccountContentItem = {
   id: number; note_id: string; title: string; content: string; views: number; likes: number;
   collects: number; comments: number; shares: number; source: string; created_at: string;
@@ -918,8 +943,18 @@ export type OperationPlan = {
 
 export type LearningInsight = {
   id: number; platform_account_id?: number | null; insight_type: string; title: string;
-  conclusion: string; evidence: Record<string, unknown>; sample_size: number;
+  conclusion: string; evidence: Record<string, unknown> & {
+    evidence_summary?: string; evidence_note_ids?: string[]; recommended_action?: string;
+    proposal_id?: number; source_note_count?: number;
+  }; sample_size: number;
   confidence: number; status: string; created_at: string;
+};
+
+export type OperationPlanDraftResult = {
+  plan: OperationPlan;
+  draft: { id: number; platform: string; platform_account_id: number; title: string; body: string; created_at: string };
+  publish_job?: { id: number; platform_account_id: number; source_draft_id: number; title: string; body: string; publish_mode: string; status: string; scheduled_at?: string | null } | null;
+  created: boolean;
 };
 
 export type LearningOverview = {
@@ -936,12 +971,19 @@ export type StrategyProposal = {
   status: "pending" | "approved" | "rejected" | "superseded" | string;
   source_note_count: number;
   strategy: {
+    analysis_source?: "ai" | "rules" | string;
     summary?: string; diagnosis?: string[]; positioning?: string; target_audience?: string;
     content_directions?: string[]; daily_post_count?: number; daily_generate_count?: number; daily_publish_count?: number; preferred_times?: string[];
     goals?: string[]; tone?: string; forbidden_topics?: string[];
     content_ratio?: Record<string, number>; title_rules?: string[];
-    learning_insights?: Array<{ type: string; title: string; conclusion: string; confidence: number }>;
-    seven_day_topics?: Array<{ direction: string; topic: string }>;
+    learning_insights?: Array<{
+      type: string; title: string; conclusion: string; confidence: number;
+      evidence_note_ids?: string[]; evidence_summary?: string; recommended_action?: string;
+    }>;
+    seven_day_topics?: Array<{
+      date?: string; direction: string; topic: string; angle?: string; title_idea?: string;
+      product_relevance?: string | boolean; review_required?: boolean;
+    }>;
   };
   analysis_error: string; created_at: string; confirmed_at?: string | null;
 };

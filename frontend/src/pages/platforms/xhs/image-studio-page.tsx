@@ -21,6 +21,7 @@ import {
   Input,
   Modal,
   Pagination,
+  Radio,
   Row,
   Select,
   Space,
@@ -56,6 +57,26 @@ import type { DescribeOptionsResponse, GeneratedImageAsset, ModelConfig, UserIma
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
 
+type ImageRatio = "auto" | "1:1" | "4:3" | "3:4" | "16:9" | "9:16" | "3:2" | "2:3";
+type ImageResolution = "1K" | "2K" | "4K";
+
+const IMAGE_RATIO_DIMENSIONS: Record<Exclude<ImageRatio, "auto">, [number, number]> = {
+  "1:1": [1024, 1024],
+  "4:3": [1152, 864],
+  "3:4": [864, 1152],
+  "16:9": [1280, 720],
+  "9:16": [720, 1280],
+  "3:2": [1152, 768],
+  "2:3": [768, 1152],
+};
+
+function imageSizeForSelection(ratio: ImageRatio, resolution: ImageResolution): string | undefined {
+  if (ratio === "auto") return undefined;
+  const scale = { "1K": 1, "2K": 2, "4K": 4 }[resolution];
+  const [width, height] = IMAGE_RATIO_DIMENSIONS[ratio];
+  return `${width * scale}x${height * scale}`;
+}
+
 function isRenderableImage(value: string): boolean {
   return (
     value.startsWith("http://") ||
@@ -79,6 +100,8 @@ export function XhsImageStudioPage() {
   const [error, setError] = useState<string | null>(null);
   const [refPickerOpen, setRefPickerOpen] = useState(false);
   const [saveToAssets, setSaveToAssets] = useState(true);
+  const [imageRatio, setImageRatio] = useState<ImageRatio>("auto");
+  const [imageResolution, setImageResolution] = useState<ImageResolution>("1K");
   const [generatedPreview, setGeneratedPreview] = useState<string | null>(null);
   const [uploadingCount, setUploadingCount] = useState(0);
   const [uploadFailedCount, setUploadFailedCount] = useState(0);
@@ -143,6 +166,7 @@ export function XhsImageStudioPage() {
         model_config_id: imageModelId ?? undefined,
         reference_images:
           referenceImages.length > 0 ? referenceImages : undefined,
+        size: imageSizeForSelection(imageRatio, imageResolution),
         save_to_assets: saveToAssets,
       });
       if (imagePrompt.promptId !== null && imagePrompt.version !== null) {
@@ -329,6 +353,43 @@ export function XhsImageStudioPage() {
               style={{ marginBottom: 12 }}
             />
 
+            <div style={{ marginBottom: 12 }}>
+              <Text type="secondary" style={{ fontSize: 12, marginBottom: 6, display: "block" }}>宽高比</Text>
+              <Space wrap size={[6, 6]}>
+                {(["auto", "1:1", "4:3", "3:4", "16:9", "9:16", "3:2", "2:3"] as ImageRatio[]).map((ratio) => (
+                  <Radio.Button
+                    key={ratio}
+                    value={ratio}
+                    checked={imageRatio === ratio}
+                    onClick={() => setImageRatio(ratio)}
+                    style={{ minWidth: 58, textAlign: "center" }}
+                    disabled={isGenerating}
+                  >
+                    {ratio === "auto" ? "自动" : ratio}
+                  </Radio.Button>
+                ))}
+              </Space>
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <Text type="secondary" style={{ fontSize: 12, marginBottom: 6, display: "block" }}>分辨率</Text>
+              <Space.Compact block>
+                {(["1K", "2K", "4K"] as ImageResolution[]).map((resolution) => (
+                  <Button
+                    key={resolution}
+                    type={imageResolution === resolution ? "primary" : "default"}
+                    onClick={() => setImageResolution(resolution)}
+                    disabled={isGenerating}
+                    style={{ flex: 1 }}
+                  >
+                    {resolution}
+                  </Button>
+                ))}
+              </Space.Compact>
+              <Text type="secondary" style={{ fontSize: 11, display: "block", marginTop: 4 }}>
+                {imageRatio === "auto" ? "自动比例由生图模型决定" : `将以 ${imageSizeForSelection(imageRatio, imageResolution)} 生成`}
+              </Text>
+            </div>
+
             {/* Reference images */}
             <div style={{ marginBottom: 12 }}>
               <Text
@@ -435,7 +496,7 @@ export function XhsImageStudioPage() {
               <Col>
                 <Space>
                   <Button
-                    onClick={() => { setPrompt(""); setReferenceImages([]); setGeneratedPreview(null); setSaveToAssets(true); }}
+                    onClick={() => { setPrompt(""); setReferenceImages([]); setGeneratedPreview(null); setSaveToAssets(true); setImageRatio("auto"); setImageResolution("1K"); }}
                     disabled={isGenerating}
                   >
                     重置

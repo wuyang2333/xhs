@@ -46,21 +46,24 @@ import {
   deletePublishAsset,
   deletePublishJob,
   fetchAccounts,
+  fetchProducts,
   fetchPublishAssets,
   fetchPublishJob,
   fetchPublishJobs,
   publishAndroidDirect,
   publishJobToCreator,
+  createProduct,
   updatePublishJob,
 } from "../../../lib/api";
 import { formatShanghaiTime } from "../../../lib/time";
-import type { MediaAsset, PlatformAccount, PublishAsset, PublishJob } from "../../../types";
+import type { MediaAsset, PlatformAccount, Product, PublishAsset, PublishJob } from "../../../types";
 import { AssetLibraryPicker } from "../../../components/assets/asset-library-picker";
 
 const { Title, Text, Paragraph } = Typography;
 
 const STATUS_TAG_MAP: Record<string, { color: string; label: string }> = {
   pending: { color: "blue", label: "待发布" },
+  queued: { color: "processing", label: "排队中" },
   uploading: { color: "processing", label: "上传中" },
   publishing: { color: "processing", label: "发布中" },
   published: { color: "green", label: "已发布" },
@@ -100,6 +103,7 @@ export function XhsPublishPage() {
   const [accountFilter, setAccountFilter] = useState<number | undefined>();
   const [assets, setAssets] = useState<PublishAsset[]>([]);
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null);
   const [selectedAccountId, setSelectedAccountId] = useState<number | null>(null);
   const [publishMode, setPublishMode] = useState<"immediate" | "scheduled">("immediate");
@@ -120,12 +124,27 @@ export function XhsPublishPage() {
 
   const creatorAccounts = accounts.filter((a) => a.platform === "xhs" && a.sub_type === "creator");
   const androidAccounts = accounts.filter((a) => a.platform === "xhs" && a.sub_type === "android");
+  const androidAccountLabel = (account: PlatformAccount): string => {
+    const space = account.profile?.android_user;
+    const suffix = String(space ?? "0") === "999" ? "XSpace" : `用户 ${String(space ?? "0")}`;
+    return `安卓手机 · ${account.nickname || account.external_user_id || `设备 #${account.id}`} · ${suffix}`;
+  };
   const filteredJobs = jobs.filter((job) => (statusFilter === "all" || job.status === statusFilter) && (!accountFilter || job.platform_account_id === accountFilter));
   const productOptions = useMemo(() => Array.from(new Set(
-    jobs
+    [
+      ...products.map((product) => product.name.trim()),
+      ...jobs
       .map((job) => job.publish_options?.product_keyword?.trim())
       .filter((value): value is string => Boolean(value)),
-  )).sort((a, b) => a.localeCompare(b, "zh-CN")).map((value) => ({ value, label: value })), [jobs]);
+    ].filter(Boolean),
+  )).sort((a, b) => a.localeCompare(b, "zh-CN")).map((value) => ({ value, label: value })), [jobs, products]);
+  const visibleProductOptions = useMemo(() => {
+    const input = productKeyword.trim();
+    if (!input || productOptions.some((option) => option.value.toLowerCase() === input.toLowerCase())) {
+      return productOptions;
+    }
+    return [{ value: input, label: `使用“${input}”` }, ...productOptions];
+  }, [productKeyword, productOptions]);
   const selectedJob = jobs.find((job) => job.id === selectedJobId) ?? null;
   const selectedAccount = accounts.find((account) => account.id === selectedAccountId) ?? null;
   const isAndroidPublish = selectedAccount?.sub_type === "android";
@@ -145,7 +164,7 @@ export function XhsPublishPage() {
   );
   const hasAnyAsset = assets.length > 0;
   const isScheduleValid = publishMode !== "scheduled" || isFutureScheduledAt(scheduledAt);
-  const isPublishLocked = selectedJob ? ["publishing", "published", "scheduled", "verification_required"].includes(selectedJob.status) : false;
+  const isPublishLocked = selectedJob ? ["queued", "publishing", "published", "scheduled", "verification_required"].includes(selectedJob.status) : false;
   const hasAccount = Boolean(selectedAccountId || (selectedJob && selectedJob.platform_account_id && selectedJob.platform_account_id > 0));
   const readyChecks = [
     { label: "标题已填写", ok: Boolean(selectedJob?.title?.trim()) },
@@ -161,13 +180,15 @@ export function XhsPublishPage() {
     if (!selectedJob) throw new Error("请选择发布任务");
     const updated = await updatePublishJob(selectedJob.id, {
       platform_account_id: selectedAccountId,
-      publish_mode: "immediate",
+      publish_mode: publishMode,
+      scheduled_at: publishMode === "scheduled" && scheduledAt ? scheduledAt.replace("T", " ") : null,
       topics: parseTopics(topicsText),
       location: location.trim() || null,
       product_keyword: attachProduct ? productKeyword.trim() || null : null,
       is_private: privacyChoice === "private",
     });
     setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
+    await rememberProductKeyword();
     applyJob(updated);
     return updated;
   }
@@ -250,6 +271,25 @@ export function XhsPublishPage() {
     }
   }
 
+  async function loadProducts() {
+    try {
+      setProducts(await fetchProducts());
+    } catch {
+      setProducts([]);
+    }
+  }
+
+  async function rememberProductKeyword() {
+    const name = attachProduct ? productKeyword.trim() : "";
+    if (!name || products.some((product) => product.name.toLowerCase() === name.toLowerCase())) return;
+    try {
+      const created = await createProduct({ name });
+      setProducts((current) => [...current, created].sort((a, b) => a.name.localeCompare(b.name, "zh-CN")));
+    } catch {
+      await loadProducts();
+    }
+  }
+
   async function loadJobs() {
     setIsLoading(true);
     setError(null);
@@ -301,6 +341,7 @@ export function XhsPublishPage() {
         is_private: privacyChoice === "private",
       });
       setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
+      await rememberProductKeyword();
       applyJob(updated);
       setMessage(`发布参数已保存。`);
     } catch {
@@ -329,6 +370,7 @@ export function XhsPublishPage() {
         product_keyword: attachProduct ? productKeyword.trim() || null : null,
         is_private: privacyChoice === "private",
       });
+      await rememberProductKeyword();
       const updated = await publishJobToCreator(selectedJob.id);
       setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
       applyJob(updated);
@@ -356,12 +398,19 @@ export function XhsPublishPage() {
       const updated = await publishAndroidDirect(saved.id);
       setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)));
       applyJob(updated);
-      setMessage(`发布任务 #${updated.id} 已通过安卓手机发布。`);
+       setMessage(updated.status === "scheduled"
+         ? `发布任务 #${updated.id} 已提交到手机端定时发布。`
+         : `发布任务 #${updated.id} 已通过安卓手机发布。`);
     } catch (err: unknown) {
       const d = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       const code = (err as { response?: { status?: number } })?.response?.status;
       if (code === 409) setMessage(d || "已点击手机发布按钮，请检查手机后确认结果，勿重复发布。");
-      else setError(d || "安卓手机发布失败。请保持手机解锁、USB 已连接，并停留在正常小红书账号中。");
+      else if (d) setError(d);
+      else if ((err as { code?: string })?.code === "ECONNABORTED") {
+        setError("发布操作耗时较长，网络连接已超时。请先检查手机是否已经发布成功，不要立即重复发布。");
+      } else if (!(err as { response?: unknown })?.response) {
+        setError("无法连接到主机后端。请确认主机仍在线、手机 USB 已连接，并从局域网地址重新打开页面。");
+      } else setError("安卓手机发布失败。请保持手机解锁、USB 已连接，并停留在正常小红书账号中。");
       try {
         const refreshed = await fetchPublishJob(selectedJob.id);
         setJobs((current) => current.map((job) => (job.id === refreshed.id ? refreshed : job)));
@@ -410,6 +459,7 @@ export function XhsPublishPage() {
   useEffect(() => {
     void loadJobs();
     void loadAccounts();
+    void loadProducts();
   }, []);
 
   const scheduledDayjs: Dayjs | null = scheduledAt ? dayjs(scheduledAt) : null;
@@ -652,15 +702,12 @@ export function XhsPublishPage() {
                           <Form.Item label="发布账号" required>
                             <Select
                               value={selectedAccountId}
-                              onChange={(val) => {
-                                setSelectedAccountId(val);
-                                if (accounts.find((account) => account.id === val)?.sub_type === "android") setPublishMode("immediate");
-                              }}
+                              onChange={(val) => setSelectedAccountId(val)}
                               placeholder="选择 Creator 或安卓手机账号"
                               style={{ width: "100%" }}
-                              options={[
+                                  options={[
                                 ...creatorAccounts.map((a) => ({ value: a.id, label: `Creator · ${a.nickname || `账号 #${a.id}`}` })),
-                                ...androidAccounts.map((a) => ({ value: a.id, label: `安卓手机 · ${a.nickname || a.external_user_id || `设备 #${a.id}`}` })),
+                                ...androidAccounts.map((a) => ({ value: a.id, label: androidAccountLabel(a) })),
                               ]}
                               notFoundContent="暂无 Creator 或安卓手机账号"
                             />
@@ -674,14 +721,15 @@ export function XhsPublishPage() {
                             </Checkbox>
                           </Form.Item>
                           {attachProduct && (
-                            <Form.Item label="挂车商品" required extra="可搜索历史已保存商品；新商品首次输入并保存后会进入列表。">
+                            <Form.Item label="挂车商品" required extra="可从商品库或历史记录选择；也可输入新商品名称，回车选用，保存后会进入列表。">
                               <AutoComplete
                                 value={productKeyword}
-                                options={productOptions}
+                                options={visibleProductOptions}
                                 onChange={setProductKeyword}
                                 onSelect={setProductKeyword}
                                 filterOption={(input, option) => String(option?.value ?? "").toLowerCase().includes(input.toLowerCase())}
-                                placeholder="搜索或选择挂车商品"
+                                placeholder="搜索商品，或输入名称后回车选用"
+                                notFoundContent="暂无已保存商品，可直接输入新商品名称"
                                 style={{ width: "100%" }}
                               />
                             </Form.Item>
@@ -704,8 +752,7 @@ export function XhsPublishPage() {
                                 <Select
                                   value={publishMode}
                                   onChange={(val) => setPublishMode(val)}
-                                  disabled={isAndroidPublish}
-                                  options={[
+                                   options={[
                                     { value: "immediate", label: "立即发布" },
                                     { value: "scheduled", label: "定时发布" },
                                   ]}
@@ -713,7 +760,7 @@ export function XhsPublishPage() {
                               </Form.Item>
                             </Col>
                           </Row>
-                          {publishMode === "scheduled" && !isAndroidPublish && (
+                          {publishMode === "scheduled" && (
                             <Form.Item label="定时时间">
                               <DatePicker
                                 showTime

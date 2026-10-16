@@ -43,6 +43,10 @@ def _sync_model_configs() -> None:
             if existing:
                 # 已存在的更新密钥和默认标记（用户可能在另一台机器上改过）
                 existing.encrypted_api_key = cfg["encrypted_api_key"]
+                # 配置文件中的地址是可迁移配置；已存在记录也要跟随更新，
+                # 否则页面和实际运行时数据库会继续使用旧地址。
+                if "base_url" in cfg:
+                    existing.base_url = cfg.get("base_url", "")
                 if cfg.get("is_default"):
                     db.query(ModelConfig).filter(
                         ModelConfig.user_id == 1,

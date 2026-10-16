@@ -36,3 +36,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local screenshots, UI dumps, and runtime diagnostics
+/local-artifacts/
+
+# pytest 临时工作目录（测试运行产物，不入库）
+/.pytest-temp-*/

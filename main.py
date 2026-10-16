@@ -18,6 +18,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--reload", action="store_true", help="Enable Uvicorn reload.")
     parser.add_argument("--with-frontend", action="store_true", help="Also start the frontend Vite dev server.")
     parser.add_argument("--frontend-port", type=int, default=5173, help="Frontend dev server port.")
+    parser.add_argument(
+        "--frontend-host",
+        default="0.0.0.0",
+        help="Frontend dev server bind host. Use 0.0.0.0 for LAN access.",
+    )
     return parser.parse_args(argv)
 
 
@@ -28,20 +33,25 @@ def resolve_npm_executable() -> str:
     return npm
 
 
-def build_frontend_command(port: int, npm_executable: Optional[str] = None) -> list[str]:
+def build_frontend_command(
+    port: int,
+    npm_executable: Optional[str] = None,
+    host: str = "127.0.0.1",
+) -> list[str]:
     npm = npm_executable or resolve_npm_executable()
-    return [npm, "run", "dev", "--", "--host", "127.0.0.1", "--port", str(port)]
+    return [npm, "run", "dev", "--", "--host", host, "--port", str(port)]
 
 
-def start_frontend(port: int) -> Optional[subprocess.Popen]:
+def start_frontend(port: int, host: str = "0.0.0.0") -> Optional[subprocess.Popen]:
     frontend_dir = ROOT / "frontend"
     package_json = frontend_dir / "package.json"
     if not package_json.exists():
         print("frontend/package.json not found; skipping frontend startup.")
         return None
 
-    command = build_frontend_command(port)
-    print(f"Starting frontend at http://127.0.0.1:{port}")
+    command = build_frontend_command(port, host=host)
+    display_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    print(f"Starting frontend at http://{display_host}:{port} (bind: {host})")
     return subprocess.Popen(command, cwd=str(frontend_dir))
 
 
@@ -62,7 +72,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except Exception:
         pass
 
-    frontend_process = start_frontend(args.frontend_port) if args.with_frontend else None
+    frontend_process = start_frontend(args.frontend_port, args.frontend_host) if args.with_frontend else None
 
     print(f"Starting backend at http://{host}:{port}")
     try:

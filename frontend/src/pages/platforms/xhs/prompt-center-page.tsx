@@ -1,20 +1,23 @@
 import {
-  CloudSyncOutlined, DatabaseOutlined, EyeOutlined, FolderOpenOutlined, PlusOutlined,
-  SafetyCertificateOutlined, SyncOutlined,
+  CloudSyncOutlined, CopyOutlined, DatabaseOutlined, DeleteOutlined, EditOutlined, EyeOutlined,
+  FolderOpenOutlined, HistoryOutlined, MoreOutlined, PauseCircleOutlined, PlayCircleOutlined,
+  PlusOutlined, SafetyCertificateOutlined, SyncOutlined,
 } from "@ant-design/icons";
 import {
-  Alert, Button, Card, Col, Drawer, Form, Input, InputNumber, List, message, Modal,
-  Row, Select, Space, Statistic, Table, Tag, Typography,
+  Alert, Button, Card, Checkbox, Col, Collapse, Drawer, Dropdown, Empty, Form,
+  Input, InputNumber, List, message, Modal, Row, Select, Space, Spin, Statistic, Table,
+  Tag, Typography,
 } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import type { Key } from "react";
 import {
-  createBackup, createPromptTemplate, fetchAccounts, fetchAssetScenes, fetchBackups,
-  fetchObsidianSyncConfig, fetchProducts, fetchPromptTemplates, importObsidianPrompts,
-  saveObsidianSyncConfig, scanObsidianVault, updatePromptTemplate,
+  activatePromptTemplate, archivePromptTemplate, createBackup, createPromptTemplate,
+  deletePromptTemplate, fetchAccounts, fetchAssetScenes, fetchBackups, fetchObsidianSyncConfig,
+  fetchProducts, fetchPromptTemplates, fetchPromptVersions, importObsidianPrompts,
+  restorePromptVersion, saveObsidianSyncConfig, scanObsidianVault, updatePromptTemplate,
 } from "../../../lib/api";
 import type {
-  BackupItem, ObsidianScanItem, ObsidianSyncConfig, PromptTemplateItem,
+  BackupItem, ObsidianScanItem, ObsidianSyncConfig, PromptTemplateItem, PromptVersionItem,
 } from "../../../lib/api";
 import type { AssetScene, PlatformAccount, Product } from "../../../types";
 
@@ -45,21 +48,24 @@ export function XhsPromptCenterPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [scenes, setScenes] = useState<AssetScene[]>([]);
   const [editing, setEditing] = useState<PromptTemplateItem | null>(null);
-  const [editProductId, setEditProductId] = useState<number | undefined>();
-  const [editSceneId, setEditSceneId] = useState<number | undefined>();
-  const [editContent, setEditContent] = useState("");
   const [editBusy, setEditBusy] = useState(false);
+  const [historyPrompt, setHistoryPrompt] = useState<PromptTemplateItem | null>(null);
+  const [versions, setVersions] = useState<PromptVersionItem[]>([]);
+  const [versionsBusy, setVersionsBusy] = useState(false);
+  const [restoreBusy, setRestoreBusy] = useState<number | null>(null);
+  const [compareVersions, setCompareVersions] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [syncBusy, setSyncBusy] = useState(false);
   const [form] = Form.useForm();
+  const [editForm] = Form.useForm();
   const accountMap = useMemo(() => new Map(accounts.map(x => [x.id, x.nickname || `#${x.id}`])), [accounts]);
   const productMap = useMemo(() => new Map(products.map(x => [x.id, x.name])), [products]);
   const sceneMap = useMemo(() => new Map(scenes.map(x => [x.id, x.name])), [scenes]);
 
   async function load() {
     const [p, b, a, o, prod, sc] = await Promise.all([
-      fetchPromptTemplates(), fetchBackups(), fetchAccounts("xhs"), fetchObsidianSyncConfig(),
+      fetchPromptTemplates({ status: "" }), fetchBackups(), fetchAccounts("xhs"), fetchObsidianSyncConfig(),
       fetchProducts(), fetchAssetScenes(),
     ]);
     setItems(p.items); setBackups(b.items); setAccounts(a); setObsidian(o); setVaultPath(o.vault_path || "");
@@ -68,30 +74,92 @@ export function XhsPromptCenterPage() {
 
   function openEdit(row: PromptTemplateItem) {
     setEditing(row);
-    setEditProductId(row.product_id ?? undefined);
-    setEditSceneId(row.scene_id ?? undefined);
-    setEditContent(row.content);
+    editForm.setFieldsValue({
+      name: row.name, prompt_type: row.prompt_type, priority: row.priority,
+      platform_account_id: row.platform_account_id ?? undefined,
+      product_id: row.product_id ?? undefined, scene_id: row.scene_id ?? undefined,
+      scenes: row.scenes.join("，"), content: row.content,
+      change_note: "",
+    });
   }
 
-  async function saveBindings() {
+  async function saveEditing(values: Record<string, unknown>) {
     if (!editing) return;
     setEditBusy(true);
     try {
-      const contentChanged = editContent.trim() !== editing.content.trim();
+      const content = String(values.content || "").trim();
+      const contentChanged = content !== editing.content.trim();
       await updatePromptTemplate(editing.id, {
-        name: editing.name, prompt_type: editing.prompt_type,
-        platform_account_id: editing.platform_account_id ?? null,
-        product_id: editProductId ?? null, scene_id: editSceneId ?? null,
-        scenes: editing.scenes, tags: editing.tags,
-        content: editContent,
-        status: editing.status, priority: editing.priority,
-        change_note: contentChanged ? "修改指令正文" : "调整产品 / 场景绑定",
+        name: String(values.name).trim(), prompt_type: String(values.prompt_type),
+        platform_account_id: values.platform_account_id ? Number(values.platform_account_id) : null,
+        product_id: values.product_id ? Number(values.product_id) : null,
+        scene_id: values.scene_id ? Number(values.scene_id) : null,
+        scenes: String(values.scenes || "").split(/[,，\n]/).map(x => x.trim()).filter(Boolean),
+        tags: editing.tags, content,
+        status: editing.status, priority: Number(values.priority || 0),
+        change_note: contentChanged ? String(values.change_note || "人工修改指令正文").trim() : "更新指令信息",
       });
-      message.success(contentChanged ? "指令正文已更新，生成新版本" : "绑定已更新");
+      message.success(contentChanged ? "指令已更新，并生成一个新版本" : "指令信息已更新，版本号不变");
       setEditing(null);
       await load();
     } catch (error) { message.error(errorMessage(error)); }
     finally { setEditBusy(false); }
+  }
+
+  async function openHistory(row: PromptTemplateItem) {
+    setHistoryPrompt(row); setVersions([]); setCompareVersions([]); setVersionsBusy(true);
+    try { const result = await fetchPromptVersions(row.id); setVersions(result.items); }
+    catch (error) { message.error(errorMessage(error)); }
+    finally { setVersionsBusy(false); }
+  }
+
+  async function copyPrompt(row: PromptTemplateItem) {
+    try {
+      const copy = await createPromptTemplate({
+        name: `${row.name}（副本）`, prompt_type: row.prompt_type,
+        platform_account_id: row.platform_account_id ?? null, product_id: row.product_id ?? null,
+        scene_id: row.scene_id ?? null, scenes: row.scenes, tags: row.tags, content: row.content,
+        status: "active", priority: row.priority,
+      });
+      message.success("副本已创建，可继续编辑"); await load(); openEdit(copy);
+    } catch (error) { message.error(errorMessage(error)); }
+  }
+
+  async function setPromptActive(row: PromptTemplateItem, active: boolean) {
+    try {
+      if (active) await activatePromptTemplate(row.id); else await archivePromptTemplate(row.id);
+      message.success(active ? "指令已启用" : "指令已停用，不再出现在指令选择器中"); await load();
+    } catch (error) { message.error(errorMessage(error)); }
+  }
+
+  function confirmDelete(row: PromptTemplateItem) {
+    Modal.confirm({
+      title: `永久删除“${row.name}”？`,
+      content: "只有从未被使用过的指令才能删除。删除后无法恢复；如需保留记录，请选择停用。",
+      okText: "永久删除", okButtonProps: { danger: true }, cancelText: "取消",
+      onOk: async () => {
+        try { await deletePromptTemplate(row.id); message.success("指令已永久删除"); await load(); }
+        catch (error) { message.error(errorMessage(error)); throw error; }
+      },
+    });
+  }
+
+  function confirmRestore(version: PromptVersionItem) {
+    if (!historyPrompt) return;
+    Modal.confirm({
+      title: `恢复 v${version.version} 的正文？`,
+      content: `不会覆盖已有历史。系统会将 v${version.version} 的正文保存为 v${historyPrompt.current_version + 1}。`,
+      okText: "恢复为新版本", cancelText: "取消",
+      onOk: async () => {
+        setRestoreBusy(version.version);
+        try {
+          const updated = await restorePromptVersion(historyPrompt.id, version.version);
+          message.success(`已恢复并生成 v${updated.current_version}`);
+          setHistoryPrompt(updated); const result = await fetchPromptVersions(updated.id); setVersions(result.items); await load();
+        } catch (error) { message.error(errorMessage(error)); throw error; }
+        finally { setRestoreBusy(null); }
+      },
+    });
   }
 
   useEffect(() => { void load(); }, []);
@@ -153,6 +221,34 @@ export function XhsPromptCenterPage() {
       content: "同步前会自动创建数据库回撤点；新增内容进入正式指令库，已有内容变化时生成新版本。",
       okText: "确认同步", cancelText: "取消", onOk: syncSelected,
     });
+  }
+
+  const compared = compareVersions
+    .map(version => versions.find(item => item.version === version))
+    .filter((item): item is PromptVersionItem => Boolean(item));
+
+  function renderComparison() {
+    if (compared.length !== 2) return null;
+    const [left, right] = [...compared].sort((a, b) => a.version - b.version);
+    const leftLines = left.content.split("\n"); const rightLines = right.content.split("\n");
+    const count = Math.max(leftLines.length, rightLines.length);
+    return <Card size="small" title={`正文对比 · v${left.version} → v${right.version}`} style={{ marginBottom: 16 }}>
+      <Row gutter={12}>
+        {[left, right].map((version, side) => <Col span={12} key={version.version}>
+          <Text strong>v{version.version}</Text>
+          <div style={{ marginTop: 8, maxHeight: 280, overflow: "auto", fontFamily: "monospace", fontSize: 12 }}>
+            {Array.from({ length: count }, (_, index) => {
+              const own = side === 0 ? leftLines[index] : rightLines[index];
+              const other = side === 0 ? rightLines[index] : leftLines[index];
+              const changed = own !== other;
+              return <div key={index} style={{ minHeight: 22, padding: "2px 6px", whiteSpace: "pre-wrap", background: changed ? (side === 0 ? "rgba(255,77,79,.14)" : "rgba(82,196,26,.14)") : undefined }}>
+                <Text type="secondary" style={{ marginRight: 8 }}>{index + 1}</Text>{own ?? ""}
+              </div>;
+            })}
+          </div>
+        </Col>)}
+      </Row>
+    </Card>;
   }
 
   return <div>
@@ -218,17 +314,26 @@ export function XhsPromptCenterPage() {
       <Col span={8}><Card><Statistic title="指令版本" value={items.reduce((n, x) => n + x.current_version, 0)} /></Card></Col>
     </Row>
     <Card title="指令库" style={{ marginTop: 16 }} extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>新增指令</Button>}>
-      <Table rowKey="id" dataSource={items} pagination={false} columns={[
+      <Table rowKey="id" dataSource={items} pagination={false} scroll={{ x: 1450 }} columns={[
         { title: "类型", dataIndex: "prompt_type", render: value => <Tag color="blue">{labels[value] || value}</Tag> },
         { title: "名称", dataIndex: "name" },
         { title: "账号", dataIndex: "platform_account_id", render: value => value ? accountMap.get(value) : "全局" },
         { title: "产品", dataIndex: "product_id", render: value => value ? <Tag color="geekblue">{productMap.get(value) || `#${value}`}</Tag> : "通用" },
-        { title: "场景绑定", dataIndex: "scene_id", render: value => value ? <Tag color="cyan">{sceneMap.get(value) || `#${value}`}</Tag> : "通用" },
-        { title: "场景标签", dataIndex: "scenes", render: value => value.length ? value.map((scene: string) => <Tag key={scene}>{scene}</Tag>) : "—" },
-        { title: "版本", dataIndex: "current_version", render: value => `v${value}` },
+        { title: "内容场景分类", dataIndex: "scene_id", render: value => value ? <Tag color="cyan">{sceneMap.get(value) || `#${value}`}</Tag> : "通用" },
+        { title: "匹配关键词", dataIndex: "scenes", render: value => value.length ? value.map((scene: string) => <Tag key={scene}>{scene}</Tag>) : "—" },
+        { title: "版本", dataIndex: "current_version", render: (value, record: PromptTemplateItem) => <Button type="link" size="small" icon={<HistoryOutlined />} onClick={() => void openHistory(record)}>v{value}</Button> },
         { title: "官方", dataIndex: "is_official", render: value => value ? <Tag color="gold">官方</Tag> : <Tag>自建</Tag> },
         { title: "来源", dataIndex: "source_type", render: value => <Tag color={value === "obsidian" ? "purple" : "default"}>{value === "obsidian" ? "Obsidian" : "手工"}</Tag> },
-        { title: "操作", width: 90, render: (_, record: PromptTemplateItem) => <Button type="link" size="small" onClick={() => openEdit(record)}>改绑定</Button> },
+        { title: "状态", dataIndex: "status", render: value => value === "active" ? <Tag color="green">使用中</Tag> : <Tag>已停用</Tag> },
+        { title: "操作", width: 150, fixed: "right", render: (_, record: PromptTemplateItem) => <Space size={0}>
+          <Button type="link" size="small" icon={<EditOutlined />} onClick={() => openEdit(record)}>编辑</Button>
+          <Dropdown menu={{ items: [
+            { key: "copy", icon: <CopyOutlined />, label: "创建副本", onClick: () => void copyPrompt(record) },
+            { key: "state", icon: record.status === "active" ? <PauseCircleOutlined /> : <PlayCircleOutlined />, label: record.status === "active" ? "停用" : "启用", onClick: () => void setPromptActive(record, record.status !== "active") },
+            { type: "divider" },
+            { key: "delete", danger: true, icon: <DeleteOutlined />, label: "永久删除", onClick: () => confirmDelete(record) },
+          ] }}><Button type="text" size="small" aria-label={`更多操作：${record.name}`} icon={<MoreOutlined />} /></Dropdown>
+        </Space> },
       ]} />
     </Card>
     <Card title={<Space><SafetyCertificateOutlined />备份与回撤点</Space>} style={{ marginTop: 16 }} extra={<Button icon={<DatabaseOutlined />} loading={busy} onClick={() => void backup()}>立即完整备份</Button>}>
@@ -248,58 +353,85 @@ export function XhsPromptCenterPage() {
       </>}
     </Drawer>
 
-    <Modal title="新增正式指令" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} width={760}>
+    <Modal title="新增正式指令" open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} width={760} okText="创建指令" cancelText="取消">
       <Form form={form} layout="vertical" onFinish={values => void save(values)} initialValues={{ prompt_type: "note", priority: 0 }}>
-        <Row gutter={16}><Col span={12}><Form.Item name="name" label="指令名称" rules={[{ required: true }]}><Input /></Form.Item></Col><Col span={6}><Form.Item name="prompt_type" label="类型"><Select options={Object.entries(labels).map(([value, label]) => ({ value, label }))} /></Form.Item></Col><Col span={6}><Form.Item name="priority" label="优先级"><InputNumber min={-100} max={100} style={{ width: "100%" }} /></Form.Item></Col></Row>
-        <Form.Item name="platform_account_id" label="适用账号"><Select allowClear placeholder="不选则为全局指令" options={accounts.map(x => ({ value: x.id, label: x.nickname || `#${x.id}` }))} /></Form.Item>
-        <Row gutter={16}>
-          <Col span={12}><Form.Item name="product_id" label="绑定产品"><Select allowClear placeholder="不选则为通用指令" options={products.map(x => ({ value: x.id, label: x.name }))} /></Form.Item></Col>
-          <Col span={12}><Form.Item name="scene_id" label="绑定场景"><Select allowClear placeholder="不选则为通用指令" options={scenes.map(x => ({ value: x.id, label: x.name }))} /></Form.Item></Col>
-        </Row>
-        <Form.Item name="scenes" label="适用场景（逗号或换行分隔）"><Input placeholder="护腰选购，久坐科普，搬运防护" /></Form.Item>
+        <Row gutter={16}><Col span={16}><Form.Item name="name" label="指令名称" rules={[{ required: true, message: "请输入指令名称" }]}><Input placeholder="例如：小红书种草文案" /></Form.Item></Col><Col span={8}><Form.Item name="prompt_type" label="类型"><Select options={Object.entries(labels).map(([value, label]) => ({ value, label }))} /></Form.Item></Col></Row>
         <Form.Item name="content" label="指令正文" rules={[{ required: true }]}><Input.TextArea rows={10} /></Form.Item>
+        <Collapse ghost items={[{ key: "advanced", label: "高级设置", children: <>
+          <Form.Item name="platform_account_id" label="适用账号" extra="不选时，所有账号都可以使用这条指令。"><Select allowClear placeholder="全局指令" options={accounts.map(x => ({ value: x.id, label: x.nickname || `#${x.id}` }))} /></Form.Item>
+          <Row gutter={16}>
+            <Col span={12}><Form.Item name="product_id" label="绑定产品"><Select allowClear placeholder="通用产品" options={products.map(x => ({ value: x.id, label: x.name }))} /></Form.Item></Col>
+            <Col span={12}><Form.Item name="scene_id" label="内容场景分类"><Select allowClear placeholder="通用场景" options={scenes.map(x => ({ value: x.id, label: x.name }))} /></Form.Item></Col>
+          </Row>
+          <Form.Item name="scenes" label="匹配关键词" extra="用逗号或换行分隔，用于按使用情境推荐指令。"><Input placeholder="开箱测评，使用教程，场景分享" /></Form.Item>
+          <Form.Item name="priority" label="优先级" extra="数值越高，在同类候选指令中越靠前。普通指令保留 0 即可。"><InputNumber min={-100} max={100} style={{ width: "100%" }} /></Form.Item>
+        </> }]} />
       </Form>
     </Modal>
 
     <Modal
       title={`编辑指令 · ${editing?.name ?? ""}`} open={editing !== null}
-      onCancel={() => setEditing(null)} onOk={() => void saveBindings()}
-      confirmLoading={editBusy} okText="保存" cancelText="取消" width={640}
+      onCancel={() => setEditing(null)} onOk={() => editForm.submit()}
+      confirmLoading={editBusy} okText="保存修改" cancelText="取消" width={760}
     >
       <Alert
         type="info" showIcon style={{ marginBottom: 16 }}
-        message="修改正文会生成新版本（版本号 +1）；只改绑定不动版本号"
+        message="只有修改正文才会生成新版本"
+        description="名称、类型、账号、分类、关键词和优先级的调整不会增加版本号。"
       />
-      <Space direction="vertical" style={{ width: "100%" }} size={12}>
-        <div>
-          <Text>指令正文</Text>
-          <Input.TextArea
-            value={editContent}
-            onChange={(e) => setEditContent(e.target.value)}
-            rows={8}
-            style={{ marginTop: 4 }}
-          />
-        </div>
-        <div>
-          <Text>绑定产品</Text>
-          <Select
-            allowClear style={{ width: "100%" }} placeholder="不选则为通用指令"
-            value={editProductId} onChange={value => setEditProductId(value)}
-            options={products.map(x => ({ value: x.id, label: x.name }))}
-          />
-        </div>
-        <div>
-          <Text>绑定场景</Text>
-          <Select
-            allowClear style={{ width: "100%" }} placeholder="不选则为通用指令"
-            value={editSceneId} onChange={value => setEditSceneId(value)}
-            options={scenes.map(x => ({ value: x.id, label: x.name }))}
-          />
-        </div>
-        <Text type="secondary">
-          当前：{editing?.is_official ? "官方模板" : "自建模板"} · v{editing?.current_version ?? 1}
-        </Text>
-      </Space>
+      <Form form={editForm} layout="vertical" onFinish={values => void saveEditing(values)}>
+        <Row gutter={16}><Col span={16}><Form.Item name="name" label="指令名称" rules={[{ required: true, message: "请输入指令名称" }]}><Input /></Form.Item></Col><Col span={8}><Form.Item name="prompt_type" label="类型" rules={[{ required: true }]}><Select options={Object.entries(labels).map(([value, label]) => ({ value, label }))} /></Form.Item></Col></Row>
+        <Form.Item name="content" label="指令正文" rules={[{ required: true, message: "请输入指令正文" }]}><Input.TextArea rows={10} /></Form.Item>
+        <Form.Item noStyle shouldUpdate={(previous, current) => previous.content !== current.content}>{({ getFieldValue }) =>
+          editing && String(getFieldValue("content") || "").trim() !== editing.content.trim()
+            ? <Form.Item name="change_note" label="本次修改说明" extra="会显示在版本历史中，方便以后判断为什么修改。"><Input placeholder="例如：加强口语表达并限制标题长度" maxLength={200} /></Form.Item>
+            : null
+        }</Form.Item>
+        <Collapse ghost items={[{ key: "advanced", label: "高级设置", children: <>
+          <Form.Item name="platform_account_id" label="适用账号" extra="不选时，所有账号都可以使用这条指令。"><Select allowClear placeholder="全局指令" options={accounts.map(x => ({ value: x.id, label: x.nickname || `#${x.id}` }))} /></Form.Item>
+          <Row gutter={16}>
+            <Col span={12}><Form.Item name="product_id" label="绑定产品"><Select allowClear placeholder="通用产品" options={products.map(x => ({ value: x.id, label: x.name }))} /></Form.Item></Col>
+            <Col span={12}><Form.Item name="scene_id" label="内容场景分类"><Select allowClear placeholder="通用场景" options={scenes.map(x => ({ value: x.id, label: x.name }))} /></Form.Item></Col>
+          </Row>
+          <Form.Item name="scenes" label="匹配关键词" extra="用逗号或换行分隔，用于按使用情境推荐指令。"><Input placeholder="开箱测评，使用教程，场景分享" /></Form.Item>
+          <Form.Item name="priority" label="优先级" extra="数值越高，在同类候选指令中越靠前。"><InputNumber min={-100} max={100} style={{ width: "100%" }} /></Form.Item>
+        </> }]} />
+        <Text type="secondary">当前：{editing?.is_official ? "官方模板" : "自建模板"} · v{editing?.current_version ?? 1}</Text>
+      </Form>
     </Modal>
+
+    <Drawer
+      title={historyPrompt ? `版本历史 · ${historyPrompt.name}` : "版本历史"}
+      open={Boolean(historyPrompt)} onClose={() => setHistoryPrompt(null)} width={760}
+      extra={compareVersions.length > 0 && <Button type="link" onClick={() => setCompareVersions([])}>清除对比</Button>}
+    >
+      <Alert type="info" showIcon style={{ marginBottom: 16 }} message="历史版本不会被覆盖" description="可勾选两个版本比较正文；恢复旧版时，会将其正文保存为一个新版本。" />
+      {renderComparison()}
+      <Spin spinning={versionsBusy}>
+        {!versionsBusy && versions.length === 0 ? <Empty description="暂无版本记录" /> : <List
+          dataSource={versions}
+          renderItem={version => {
+            const current = version.version === historyPrompt?.current_version;
+            const checked = compareVersions.includes(version.version);
+            return <List.Item
+              actions={[!current && <Button key="restore" type="link" loading={restoreBusy === version.version} onClick={() => confirmRestore(version)}>恢复此版本</Button>]}
+            >
+              <List.Item.Meta
+                avatar={<Checkbox
+                  aria-label={`选择 v${version.version} 进行对比`} checked={checked}
+                  disabled={!checked && compareVersions.length >= 2}
+                  onChange={event => setCompareVersions(values => event.target.checked ? [...values, version.version] : values.filter(value => value !== version.version))}
+                />}
+                title={<Space><Text strong>v{version.version}</Text>{current && <Tag color="green">当前版本</Tag>}<Text type="secondary">{version.change_note || "未填写修改说明"}</Text></Space>}
+                description={<>
+                  <Text type="secondary">{version.created_at ? new Date(version.created_at).toLocaleString("zh-CN") : "时间未知"} · {version.created_by || "人工修改"}</Text>
+                  <Paragraph ellipsis={{ rows: 4, expandable: true, symbol: "展开正文" }} style={{ marginTop: 10, marginBottom: 0, whiteSpace: "pre-wrap" }}>{version.content}</Paragraph>
+                </>}
+              />
+            </List.Item>;
+          }}
+        />}
+      </Spin>
+    </Drawer>
   </div>;
 }

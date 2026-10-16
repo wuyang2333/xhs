@@ -632,10 +632,10 @@ def run_auto_task(
         db.refresh(auto_task)
         return {
             "auto_task": _serialize_auto_task(auto_task),
-            "keyword": (auto_task.keywords or ["护腰怎么选"])[0],
+            "keyword": (auto_task.keywords or ["待确认主题"])[0],
             "source_note": {
                 "note_id": "",
-                "title": "AI 原创护腰选题",
+                "title": draft.title or "AI 原创内容",
                 "likes": 0,
                 "collects": 0,
                 "comments": 0,

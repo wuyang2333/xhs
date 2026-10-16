@@ -383,7 +383,7 @@ export function AutoOpsPage() {
         </Paragraph>
         <Space.Compact style={{ width: "100%" }}>
           <TextArea
-            placeholder="如：每天早上九点找护腰相关的热门笔记，改写成口语化的种草文，用医麦德护具店账号发"
+            placeholder="如：每天早上九点找某产品相关的热门笔记，改写成口语化的分享文，用指定账号发布"
             value={aiDescription}
             onChange={(e) => setAiDescription(e.target.value)}
             rows={2}

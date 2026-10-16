@@ -69,6 +69,8 @@ import type {
   PlatformMeta,
   Product,
   OperationPlan,
+  AccountOperationSummary,
+  OperationPlanDraftResult,
   OperationProfile,
   PlatformUser,
   PublishAsset,
@@ -150,7 +152,11 @@ http.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config as typeof error.config & { _authRetry?: boolean; _silent?: boolean };
-    if (error.response?.status !== 401 || originalRequest?._authRetry || !getRefreshToken()) {
+    // The refresh endpoint itself must never trigger another refresh attempt.
+    // Otherwise an expired LAN-browser token loops forever and the route guard
+    // remains on "正在验证登录状态..." instead of falling back to /login.
+    const isRefreshRequest = originalRequest?.url?.includes("/auth/refresh");
+    if (error.response?.status !== 401 || originalRequest?._authRetry || isRefreshRequest || !getRefreshToken()) {
       if (!originalRequest?._silent) {
         const detail = error.response?.data?.detail;
         const msg = typeof detail === "string" ? detail : "请求失败，请稍后重试";
@@ -867,6 +873,11 @@ export async function fetchAndroidDevices(): Promise<AndroidDevice[]> {
   return response.data.items;
 }
 
+export async function fetchAndroidUsers(serial: string): Promise<import("../types").AndroidUserSpace[]> {
+  const response = await http.get<{ items: import("../types").AndroidUserSpace[] }>("/accounts/android/users", { params: { serial } });
+  return response.data.items;
+}
+
 export async function fetchAndroidSetupStatus(serial?: string): Promise<AndroidSetupStatus> {
   const response = await http.get<AndroidSetupStatus>("/accounts/android/setup-status", {
     params: serial ? { serial } : undefined,
@@ -889,7 +900,7 @@ export async function installAndroidIme(serial: string): Promise<AndroidImeInsta
   return response.data;
 }
 
-export async function bindAndroidAccount(payload: { serial: string; nickname?: string }): Promise<PlatformAccount> {
+export async function bindAndroidAccount(payload: { serial: string; nickname?: string; android_user?: string }): Promise<PlatformAccount> {
   const response = await http.post<PlatformAccount>("/accounts/android/bind", payload);
   return response.data;
 }
@@ -910,7 +921,8 @@ export async function confirmAndroidPublish(jobId: number): Promise<PublishJob> 
 }
 
 export async function publishAndroidDirect(jobId: number): Promise<PublishJob> {
-  const response = await http.post<PublishJob>(`/publish/jobs/${jobId}/android/publish`, undefined, { timeout: 300000 });
+  // A request may wait behind another note using the same physical phone.
+  const response = await http.post<PublishJob>(`/publish/jobs/${jobId}/android/publish`, undefined, { timeout: 900000 });
   return response.data;
 }
 
@@ -994,6 +1006,8 @@ export type PromptTemplateItem = {
   is_official?: boolean;
   scenes: string[]; tags: string[]; content: string; status: string; priority: number;
   current_version: number; source_type: string; source_ref: string; updated_at: string;
+  /** 推荐接口返回的命中依据与分数；普通列表接口可能不包含。 */
+  match_reasons?: string[]; match_score?: number;
 };
 export type BackupItem = {
   id: string; created_at: string; reason: string; valid: boolean;
@@ -1022,6 +1036,12 @@ export async function fetchPromptTemplates(params?: {
   return (await http.get("/prompt-library", { params })).data;
 }
 
+export async function fetchPromptRecommendations(params: {
+  prompt_type: string; account_id?: number; product_id?: number; scene_id?: number; scene?: string;
+}): Promise<{ item: PromptTemplateItem | null; candidates: PromptTemplateItem[] }> {
+  return (await http.get("/prompt-library/recommend/match", { params })).data;
+}
+
 export async function updatePromptTemplate(
   promptId: number,
   payload: Omit<PromptTemplateItem, "id" | "current_version" | "source_type" | "source_ref" | "updated_at"> & { change_note?: string },
@@ -1029,8 +1049,29 @@ export async function updatePromptTemplate(
   return (await http.put(`/prompt-library/${promptId}`, payload)).data;
 }
 
-export async function fetchPromptVersions(promptId: number): Promise<{ items: Array<{ version: number; content: string; change_note: string; created_by: string; created_at: string }> }> {
+export type PromptVersionItem = {
+  id?: number; version: number; content: string; change_note: string; created_by: string;
+  approved?: boolean; is_current?: boolean; created_at: string;
+};
+
+export async function fetchPromptVersions(promptId: number): Promise<{ current_version: number; items: PromptVersionItem[] }> {
   return (await http.get(`/prompt-library/${promptId}/versions`)).data;
+}
+
+export async function archivePromptTemplate(promptId: number): Promise<PromptTemplateItem> {
+  return (await http.post(`/prompt-library/${promptId}/archive`)).data;
+}
+
+export async function activatePromptTemplate(promptId: number): Promise<PromptTemplateItem> {
+  return (await http.post(`/prompt-library/${promptId}/activate`)).data;
+}
+
+export async function deletePromptTemplate(promptId: number): Promise<void> {
+  await http.delete(`/prompt-library/${promptId}`, { _silent: true } as never);
+}
+
+export async function restorePromptVersion(promptId: number, version: number): Promise<PromptTemplateItem> {
+  return (await http.post(`/prompt-library/${promptId}/versions/${version}/restore`)).data;
 }
 
 export async function recordPromptUsage(payload: {
@@ -1102,12 +1143,34 @@ export async function saveOperationProfile(accountId: number, payload: Omit<Oper
   return (await http.put<OperationProfile>(`/operations/profiles/${accountId}`, payload)).data;
 }
 
-export async function fetchOperationPlans(planDate: string): Promise<OperationPlan[]> {
-  return (await http.get<{ items: OperationPlan[] }>("/operations/plans", { params: { plan_date: planDate } })).data.items;
+export async function fetchOperationPlans(planDate: string, planDateTo?: string | number, accountId?: number): Promise<OperationPlan[]> {
+  const rangeEnd = typeof planDateTo === "string" ? planDateTo : undefined;
+  const legacyAccountId = typeof planDateTo === "number" ? planDateTo : accountId;
+  return (await http.get<{ items: OperationPlan[] }>("/operations/plans", {
+    params: { plan_date: planDate, plan_date_to: rangeEnd, account_id: legacyAccountId },
+  })).data.items;
 }
 
-export async function generateOperationPlans(planDate: string, accountIds: number[] = []): Promise<{ created: number; items: OperationPlan[] }> {
-  return (await http.post<{ created: number; items: OperationPlan[] }>("/operations/plans/generate", { plan_date: planDate, account_ids: accountIds })).data;
+export async function generateOperationPlans(planDate: string, planDateTo?: string | number[], accountIds: number[] = []): Promise<{ created: number; existing: number; days_requested: number; days_covered: number; daily: Array<{ plan_date: string; created: number; existing: number }>; items: OperationPlan[] }> {
+  const rangeEnd = typeof planDateTo === "string" ? planDateTo : undefined;
+  const selectedAccounts = Array.isArray(planDateTo) ? planDateTo : accountIds;
+  return (await http.post<{ created: number; existing: number; days_requested: number; days_covered: number; daily: Array<{ plan_date: string; created: number; existing: number }>; items: OperationPlan[] }>("/operations/plans/generate", {
+    plan_date: planDate,
+    ...(rangeEnd ? { plan_date_to: rangeEnd } : {}),
+    account_ids: selectedAccounts,
+  })).data;
+}
+
+export async function fetchAccountOperationSummary(accountId: number): Promise<AccountOperationSummary> {
+  return (await http.get<AccountOperationSummary>(`/operations/accounts/${accountId}/summary`)).data;
+}
+
+export async function updateOperationPlan(planId: number, payload: Partial<Pick<OperationPlan, "content_direction" | "topic" | "planned_at" | "status">>): Promise<OperationPlan> {
+  return (await http.patch<OperationPlan>(`/operations/plans/${planId}`, payload)).data;
+}
+
+export async function generateOperationPlanDraft(planId: number): Promise<OperationPlanDraftResult> {
+  return (await http.post<OperationPlanDraftResult>(`/operations/plans/${planId}/generate-draft`, { create_publish_job: false })).data;
 }
 
 export async function fetchLearningOverview(): Promise<LearningOverview> {
@@ -1122,8 +1185,15 @@ export async function createLearningInsight(payload: Omit<LearningInsight, "id" 
   return (await http.post<LearningInsight>("/operations/learning/insights", payload)).data;
 }
 
-export async function syncAccountContent(accountId: number): Promise<{ account_id: number; system_saved: number; remote_saved: number; total: number; remote_error: string; mobile_profile?: Record<string, unknown> | null; strategy_proposal?: StrategyProposal | null }> {
-  return (await http.post(`/operations/accounts/${accountId}/sync-content`, undefined, { timeout: 900000 })).data;
+export async function syncAccountContent(accountId: number, options: { mode?: "quick" | "full" | "rebuild"; analyze_after_sync?: boolean } = {}): Promise<TaskRecord> {
+  return (await http.post<TaskRecord>(`/operations/accounts/${accountId}/sync-content`, {
+    mode: options.mode || "full",
+    analyze_after_sync: Boolean(options.analyze_after_sync),
+  })).data;
+}
+
+export async function fetchAccountOperationTask(accountId: number): Promise<TaskRecord | null> {
+  return (await http.get<{ task: TaskRecord | null }>(`/operations/accounts/${accountId}/operation-task`)).data.task;
 }
 
 export async function clearAccountContent(accountId: number): Promise<{ account_id: number; deleted: number }> {
@@ -1142,12 +1212,18 @@ export async function fetchStrategyProposals(params?: { account_id?: number; sta
   return (await http.get<{ items: StrategyProposal[] }>("/operations/strategy-proposals", { params })).data.items;
 }
 
-export async function analyzeAccountStrategy(accountId: number): Promise<StrategyProposal> {
-  return (await http.post<StrategyProposal>(`/operations/accounts/${accountId}/analyze-strategy`, undefined, { timeout: 180000 })).data;
+export async function analyzeAccountStrategy(accountId: number): Promise<TaskRecord> {
+  return (await http.post<TaskRecord>(`/operations/accounts/${accountId}/analyze-strategy`)).data;
 }
 
-export async function approveStrategyProposal(proposalId: number, strategy?: StrategyProposal["strategy"]): Promise<{ proposal: StrategyProposal; profile: OperationProfile; insights_created: number; plans_created: number; auto_tasks_created: number; auto_tasks_updated: number }> {
-  return (await http.post(`/operations/strategy-proposals/${proposalId}/approve`, { strategy })).data;
+export async function approveStrategyProposal(
+  proposalId: number,
+  strategy?: StrategyProposal["strategy"],
+  options: { create_auto_tasks: boolean } = { create_auto_tasks: false },
+): Promise<{ proposal: StrategyProposal; profile: OperationProfile; insights_created: number; plans_created: number; auto_tasks_created: number; auto_tasks_updated: number; auto_tasks_enabled: boolean }> {
+  return (await http.post(`/operations/strategy-proposals/${proposalId}/approve`, {
+    strategy, create_auto_tasks: options.create_auto_tasks, enable_auto_tasks: false,
+  })).data;
 }
 
 export async function rejectStrategyProposal(proposalId: number): Promise<StrategyProposal> {

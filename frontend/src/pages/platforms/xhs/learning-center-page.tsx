@@ -1,10 +1,25 @@
 import { PlusOutlined } from "@ant-design/icons";
-import { Button, Card, Col, Form, Input, InputNumber, message, Modal, Row, Select, Statistic, Table, Tag, Typography } from "antd";
+import { Button, Card, Col, Descriptions, Form, Input, InputNumber, message, Modal, Row, Select, Space, Statistic, Table, Tag, Typography } from "antd";
 import { useEffect, useMemo, useState } from "react";
 import { createLearningInsight, fetchAccounts, fetchContentPerformance, fetchLearningInsights, fetchLearningOverview } from "../../../lib/api";
 import type { ContentPerformanceItem, LearningInsight, LearningOverview, PlatformAccount } from "../../../types";
 
 const { Title, Text } = Typography;
+const insightStatusLabels: Record<string, string> = {
+  active: "有效", pending: "待验证", validated: "已验证", archived: "已归档", insufficient_data: "数据不足",
+};
+const insightStatusColors: Record<string, string> = {
+  active: "green", pending: "gold", validated: "blue", archived: "default", insufficient_data: "orange",
+};
+const insightTypeLabels: Record<string, string> = {
+  content: "内容方向", strategy: "运营策略", title: "标题", timing: "发布时间", visual: "图片风格", audience: "人群反馈",
+};
+
+function evidenceNoteIds(insight: LearningInsight): string[] {
+  const value = insight.evidence?.evidence_note_ids;
+  return Array.isArray(value) ? value.map(String).filter(Boolean) : [];
+}
+
 export function XhsLearningCenterPage() {
   const [overview, setOverview] = useState<LearningOverview>({ profile_count: 0, active_insight_count: 0, today_plan_count: 0, published_count: 0, synced_note_count: 0 });
   const [insights, setInsights] = useState<LearningInsight[]>([]);
@@ -37,12 +52,29 @@ export function XhsLearningCenterPage() {
       ["今日规划内容", overview.today_plan_count], ["累计成功发布", overview.published_count],
     ].map(([label, value]) => <Col xs={12} lg={6} key={String(label)}><Card><Statistic title={label} value={value} /></Card></Col>)}</Row>
     <Card style={{ marginTop: 18 }} title="账号学习结论" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>新增结论</Button>}>
-      <Table rowKey="id" dataSource={insights.filter((item) => !accountFilter || item.platform_account_id === accountFilter)} columns={[
+      <Table rowKey="id" scroll={{ x: 900 }} dataSource={insights.filter((item) => !accountFilter || item.platform_account_id === accountFilter)} expandable={{
+        expandedRowRender: (record) => {
+          const noteIds = evidenceNoteIds(record);
+          const evidence = record.evidence || {};
+          return <div style={{ padding: "4px 12px 12px" }}>
+            <Descriptions size="small" column={1} bordered labelStyle={{ width: 110 }}>
+              <Descriptions.Item label="完整结论"><Text style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{record.conclusion}</Text></Descriptions.Item>
+              {evidence.evidence_summary ? <Descriptions.Item label="证据摘要"><Text style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{String(evidence.evidence_summary)}</Text></Descriptions.Item> : null}
+              {noteIds.length ? <Descriptions.Item label="关联笔记"><Space wrap>{noteIds.map((id) => <Tag key={id}>{id}</Tag>)}</Space></Descriptions.Item> : null}
+              {evidence.recommended_action ? <Descriptions.Item label="建议动作"><Text type="success" style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{String(evidence.recommended_action)}</Text></Descriptions.Item> : null}
+              {evidence.proposal_id ? <Descriptions.Item label="来源方案"><Tag color="blue">策略方案 #{String(evidence.proposal_id)}</Tag></Descriptions.Item> : null}
+            </Descriptions>
+          </div>;
+        },
+        rowExpandable: (record) => Boolean(record.conclusion || record.evidence?.evidence_summary || evidenceNoteIds(record).length || record.evidence?.recommended_action || record.evidence?.proposal_id),
+      }} columns={[
         { title: "账号", dataIndex: "platform_account_id", render: (id) => id ? accountMap.get(id) || `#${id}` : "全局" },
-        { title: "类型", dataIndex: "insight_type", render: (value) => <Tag>{value}</Tag> },
-        { title: "结论标题", dataIndex: "title" }, { title: "学习结论", dataIndex: "conclusion" },
+        { title: "类型", dataIndex: "insight_type", render: (value) => <Tag>{insightTypeLabels[value] || value}</Tag> },
+        { title: "结论标题", dataIndex: "title", width: 180, render: (value) => <Text strong style={{ overflowWrap: "anywhere" }}>{value}</Text> },
+        { title: "学习结论", dataIndex: "conclusion", width: 320, render: (value) => <Typography.Paragraph ellipsis={{ rows: 2, tooltip: value }} style={{ marginBottom: 0 }}>{value}</Typography.Paragraph> },
         { title: "样本", dataIndex: "sample_size" },
         { title: "置信度", dataIndex: "confidence", render: (value) => `${Math.round(Number(value) * 100)}%` },
+        { title: "状态", dataIndex: "status", render: (value) => <Tag color={insightStatusColors[value] || "default"}>{insightStatusLabels[value] || value}</Tag> },
       ]} />
     </Card>
     <Card style={{ marginTop: 18 }} title="已同步内容表现" extra={<Text type="secondary">按点赞、收藏、评论、分享总和排序</Text>}>

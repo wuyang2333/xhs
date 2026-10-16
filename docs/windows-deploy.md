@@ -20,12 +20,12 @@
 2. 下载并运行一键安装脚本：
 ```bash
 cd C:\
-curl -o install.bat https://raw.githubusercontent.com/shatp984-rgb/XHS/main/install.bat && install.bat
+curl -o install.bat https://raw.githubusercontent.com/wuyang2333/xhs/main/install.bat && install.bat
 ```
 
-3. 装完后双击 `C:\xhs\start.bat` 启动
+3. 装完后双击 `C:\xhs\XHS.bat`，选择后台启动
 
-4. 浏览器打开 http://localhost:8000，注册新账号
+4. 浏览器打开 http://localhost:5173，注册新账号
 
 ### 完成后
 
@@ -45,7 +45,7 @@ curl -o install.bat https://raw.githubusercontent.com/shatp984-rgb/XHS/main/inst
 2. 下载并运行一键安装脚本：
 ```bash
 cd C:\
-curl -o install.bat https://raw.githubusercontent.com/shatp984-rgb/XHS/main/install.bat && install.bat
+curl -o install.bat https://raw.githubusercontent.com/wuyang2333/xhs/main/install.bat && install.bat
 ```
 
 3. **安装跑完后先别启动**，从现有机器拷两个东西过来：
@@ -55,9 +55,9 @@ curl -o install.bat https://raw.githubusercontent.com/shatp984-rgb/XHS/main/inst
 
    可以用 U 盘、网盘、或局域网共享拷。
 
-4. 双击 `C:\xhs\start.bat` 启动
+4. 双击 `C:\xhs\XHS.bat`，选择后台启动
 
-5. 浏览器打开 http://localhost:8000，用原有账号登录
+5. 浏览器打开 http://localhost:5173，用原有账号登录
 
 ### 完成后
 
@@ -71,7 +71,7 @@ curl -o install.bat https://raw.githubusercontent.com/shatp984-rgb/XHS/main/inst
 
 | 操作 | 怎么做 |
 |---|---|
-| 启动系统 | 双击 `start.bat` |
+| 启动、停止、查看状态 | 双击 `XHS.bat` |
 | 更新代码 | 双击 `update.bat` |
 | 停止系统 | 在运行窗口按 Ctrl+C，或直接关窗口 |
 
@@ -79,7 +79,7 @@ curl -o install.bat https://raw.githubusercontent.com/shatp984-rgb/XHS/main/inst
 
 - **数据库和图片不在 git 里**——每台机器各自一份，代码更新不会覆盖数据
 - **不要把 `.venv` 文件夹拷到新机器**——每台机器要自己创建虚拟环境
-- **start.bat 窗口不能关**——关了系统就停了
+- **XHS.bat 管理窗口可以关闭**——服务会在后台继续运行；需要停止时再次双击并选择“停止服务”
 - **如果启动报错**——看窗口里的英文错误信息，截图发给开发者
 
 ## 已知的 Windows 兼容性问题（已修复）

@@ -16,11 +16,12 @@ import {
   bindAndroidAccount,
   fetchAndroidAdbInstallStatus,
   fetchAndroidDevices,
+  fetchAndroidUsers,
   fetchAndroidSetupStatus,
   installAndroidIme,
   startAndroidAdbInstall,
 } from "../../lib/api";
-import type { AdbInstallTask, AndroidDevice, AndroidSetupStatus, PlatformAccount } from "../../types";
+import type { AdbInstallTask, AndroidDevice, AndroidSetupStatus, AndroidUserSpace, PlatformAccount } from "../../types";
 
 const { Text, Paragraph } = Typography;
 
@@ -89,6 +90,8 @@ export function AndroidBindPanel({ onBound }: AndroidBindPanelProps) {
   const [setupStatus, setSetupStatus] = useState<AndroidSetupStatus | null>(null);
   const [serial, setSerial] = useState<string>();
   const [nickname, setNickname] = useState("");
+  const [androidUsers, setAndroidUsers] = useState<AndroidUserSpace[]>([]);
+  const [androidUser, setAndroidUser] = useState("0");
   const [isDetecting, setIsDetecting] = useState(true);
   const [isBinding, setIsBinding] = useState(false);
   const [adbTask, setAdbTask] = useState<AdbInstallTask | null>(null);
@@ -166,7 +169,7 @@ export function AndroidBindPanel({ onBound }: AndroidBindPanelProps) {
     setIsBinding(true);
     setError(null);
     try {
-      const account = await bindAndroidAccount({ serial, nickname: nickname.trim() });
+      const account = await bindAndroidAccount({ serial, nickname: nickname.trim(), android_user: androidUser });
       message.success("安卓手机已绑定到账号矩阵");
       onBound(account);
     } catch (caught) {
@@ -179,6 +182,14 @@ export function AndroidBindPanel({ onBound }: AndroidBindPanelProps) {
   useEffect(() => {
     void detect();
   }, [detect]);
+
+  useEffect(() => {
+    if (!serial) return;
+    void fetchAndroidUsers(serial).then((items) => {
+      setAndroidUsers(items);
+      if (!items.some((item) => item.id === androidUser)) setAndroidUser(items[0]?.id || "0");
+    }).catch(() => setAndroidUsers([{ id: "0", name: "主空间" }]));
+  }, [serial]);
 
   // 安装是长任务，轮询到终态为止。
   useEffect(() => {
@@ -357,6 +368,14 @@ export function AndroidBindPanel({ onBound }: AndroidBindPanelProps) {
           />
         </div>
         <div style={{ marginBottom: 10 }}>
+          <Text strong style={{ display: "block", marginBottom: 6 }}>应用分身空间</Text>
+          <Select
+            value={androidUser}
+            onChange={setAndroidUser}
+            style={{ width: "100%", marginBottom: 10 }}
+            options={androidUsers.map((item) => ({ value: item.id, label: `${item.name}（用户 ${item.id}）` }))}
+            placeholder="选择主空间或应用分身"
+          />
           <Text strong style={{ display: "block", marginBottom: 6 }}>备注名称（可选）</Text>
           <Input
             value={nickname}

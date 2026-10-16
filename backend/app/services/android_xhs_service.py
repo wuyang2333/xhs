@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ import urllib.error
 import urllib.request
 import uuid
 import zipfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +25,7 @@ from backend.app.services.asset_downloader import download_asset_to_local
 
 
 XHS_PACKAGE = "com.xingin.xhs"
+DEFAULT_ANDROID_USER = "0"
 
 # 中文输入法。adb 原生 `input text` 打不了中文，填标题正文必须靠它。
 IME_PACKAGE = "com.android.adbkeyboard"
@@ -116,6 +119,38 @@ class _AdbInstallRegistry:
 
 
 adb_install_registry = _AdbInstallRegistry()
+
+
+class _AndroidPublishLockRegistry:
+    """Serialize UI publishing per physical phone, while other phones run independently."""
+
+    def __init__(self) -> None:
+        self._guard = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    def _lock_for(self, serial: str) -> threading.Lock:
+        key = str(serial or "").strip()
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())
+
+    @contextmanager
+    def acquire(self, serial: str):
+        lock = self._lock_for(serial)
+        lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+
+
+android_publish_lock_registry = _AndroidPublishLockRegistry()
+
+
+@contextmanager
+def android_device_publish_lock(serial: str):
+    """Queue Android publish calls that share one physical device serial."""
+    with android_publish_lock_registry.acquire(serial):
+        yield
 
 
 def _readable_download_error(exc: BaseException) -> str:
@@ -349,19 +384,51 @@ class AndroidXhsService:
     def _getprop(self, serial: str, name: str) -> str:
         return self._adb("shell", "getprop", name, serial=serial).stdout.strip()
 
-    def _run(self, *args: str, timeout: int = 180) -> str:
+    def _run(
+        self,
+        *args: str,
+        timeout: int = 180,
+        progress_file: str | None = None,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str:
         if not self.script.is_file():
             raise RuntimeError(
                 f"安卓发布脚本不可用：{self.script}。请安装 xhs-publishing-workflow，"
                 "或设置 XHS_ANDROID_SCRIPT 指向 scripts/xhs_android.py。"
             )
-        result = subprocess.run(
-            [sys.executable, str(self.script), *args],
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            encoding="utf-8",
-        )
+        command = [sys.executable, str(self.script), *args]
+        # Keep stderr out of a PIPE while scanning.  The Android script emits
+        # diagnostic lines for every ADB/UI operation; if that pipe fills,
+        # the child can block before it gets a chance to update its checkpoint.
+        # A temporary file preserves diagnostics without creating backpressure
+        # on the long-running scan process.
+        with tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            process = subprocess.Popen(
+                command, text=True, stdout=subprocess.PIPE, stderr=stderr_file,
+                encoding="utf-8",
+            )
+            started = time.monotonic()
+            last_read = 0.0
+            while process.poll() is None:
+                if progress and progress_file and time.monotonic() - last_read >= 1:
+                    last_read = time.monotonic()
+                    try:
+                        value = json.loads(Path(progress_file).read_text(encoding="utf-8"))
+                        if isinstance(value, dict):
+                            progress(value)
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                if time.monotonic() - started >= timeout:
+                    process.kill()
+                    stdout, _ = process.communicate()
+                    stderr_file.seek(0)
+                    stderr = stderr_file.read().decode("utf-8", errors="replace")
+                    raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+                time.sleep(0.2)
+            stdout, _ = process.communicate()
+            stderr_file.seek(0)
+            stderr = stderr_file.read().decode("utf-8", errors="replace")
+        result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
         # 脚本的 stderr 是诊断日志（选图顺序等），无论成功失败都转发到后端控制台。
         if result.stderr:
             sys.stderr.write(result.stderr + "\n")
@@ -370,8 +437,8 @@ class AndroidXhsService:
             raise RuntimeError((result.stderr or result.stdout or "安卓设备命令失败") or "安卓设备命令失败")
         return (result.stdout or "").strip()
 
-    def _json(self, *args: str) -> Any:
-        output = self._run(*args)
+    def _json(self, *args: str, timeout: int = 180) -> Any:
+        output = self._run(*args, timeout=timeout)
         try:
             return json.loads(output)
         except json.JSONDecodeError as exc:
@@ -392,13 +459,25 @@ class AndroidXhsService:
             devices.append(record)
         return devices
 
-    def doctor(self, serial: str) -> dict[str, Any]:
+    def android_users(self, serial: str) -> list[dict[str, str]]:
+        """List Android user/profile spaces available on a connected device."""
+        output = self._adb("shell", "pm", "list", "users", serial=serial).stdout
+        users: list[dict[str, str]] = []
+        for match in re.finditer(r"UserInfo\{(\d+):([^:}]+)(?::[^}]*)?\}", output):
+            user_id, label = match.groups()
+            users.append({"id": user_id, "name": label.strip() or f"用户 {user_id}"})
+        if not users:
+            users.append({"id": DEFAULT_ANDROID_USER, "name": "主空间"})
+        return users
+
+    def doctor(self, serial: str, android_user: str = DEFAULT_ANDROID_USER) -> dict[str, Any]:
         states = {item["serial"]: item["state"] for item in self.devices()}
         if serial not in states:
             raise RuntimeError(f"手机未连接：{serial}")
         if states[serial] != "device":
             raise RuntimeError(f"手机尚未授权这台电脑：{serial}（{states[serial]}）")
-        packages = self._adb("shell", "pm", "list", "packages", XHS_PACKAGE, serial=serial).stdout
+        android_user = str(android_user or DEFAULT_ANDROID_USER)
+        packages = self._adb("shell", "pm", "list", "packages", "--user", android_user, XHS_PACKAGE, serial=serial).stdout
         package_dump = self._adb("shell", "dumpsys", "package", XHS_PACKAGE, serial=serial).stdout
         version_name = ""
         for line in package_dump.splitlines():
@@ -407,6 +486,7 @@ class AndroidXhsService:
                 break
         return {
             "serial": serial,
+            "android_user": android_user,
             "manufacturer": self._getprop(serial, "ro.product.manufacturer"),
             "model": self._getprop(serial, "ro.product.model"),
             "android": self._getprop(serial, "ro.build.version.release"),
@@ -416,27 +496,76 @@ class AndroidXhsService:
             "default_ime": self._adb("shell", "settings", "get", "secure", "default_input_method", serial=serial).stdout.strip(),
         }
 
-    def scan_profile(self, serial: str, max_scrolls: int = 120) -> dict[str, Any]:
-        output = self._run(
-            "scan-profile", "--serial", serial,
-            "--max-scrolls", str(max(0, min(max_scrolls, 200))),
-            timeout=900,
+    def scan_profile(
+        self,
+        serial: str,
+        android_user: str = DEFAULT_ANDROID_USER,
+        max_scrolls: int = 260,
+        max_notes: int = 500,
+        resume: bool = True,
+        identity_only: bool = False,
+        progress: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        android_user = str(android_user or DEFAULT_ANDROID_USER)
+        checkpoint_path = self._calibration_path(serial, android_user).with_name(
+            f"{self._calibration_path(serial, android_user).stem}-scan.json"
         )
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        if not resume and not identity_only:
+            checkpoint_path.unlink(missing_ok=True)
+        resume_scroll_count = 0
+        if resume and not identity_only and checkpoint_path.is_file():
+            try:
+                resume_scroll_count = max(0, int(json.loads(checkpoint_path.read_text(encoding="utf-8")).get("scroll_count", 0) or 0))
+            except (OSError, ValueError, json.JSONDecodeError):
+                resume_scroll_count = 0
+        command_args = [
+            "scan-profile", "--serial", serial, "--android-user", android_user,
+            "--max-scrolls", str(max(0, min(max_scrolls, 400))),
+            "--max-notes", str(max(1, min(max_notes, 1000))),
+            "--checkpoint-file", "" if identity_only else str(checkpoint_path),
+            "--resume-scroll-count", str(resume_scroll_count),
+        ]
+        if identity_only:
+            command_args.append("--identity-only")
+        try:
+            output = self._run(
+                *command_args,
+                timeout=600,
+                progress_file=None if identity_only else str(checkpoint_path),
+                progress=progress,
+            )
+        except subprocess.TimeoutExpired as exc:
+            if not identity_only:
+                try:
+                    partial = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                    if isinstance(partial, dict) and partial.get("notes"):
+                        partial["status"] = "scanned"
+                        partial["end_reason"] = "timeout_partial"
+                        partial["scan_error"] = f"手机扫描超过 10 分钟，已保留已读取内容：{exc}"
+                        return partial
+                except (OSError, json.JSONDecodeError):
+                    pass
+            raise RuntimeError("手机内容读取超时（超过 10 分钟），请确认手机保持亮屏并停留在小红书主页") from exc
         try:
             payload = json.loads(output)
         except json.JSONDecodeError as exc:
             raise RuntimeError("安卓设备返回格式异常") from exc
         if not isinstance(payload, dict) or payload.get("status") != "scanned":
             raise RuntimeError("手机端账号内容读取失败")
+        if not identity_only:
+            checkpoint_path.unlink(missing_ok=True)
         return payload
 
-    def _calibration_path(self, serial: str) -> Path:
+    def _calibration_path(self, serial: str, android_user: str = DEFAULT_ANDROID_USER) -> Path:
         safe_serial = "".join(char for char in serial if char.isalnum() or char in "-_")
-        return Path(get_settings().storage_dir) / "android" / "device-profiles" / f"{safe_serial}.json"
+        safe_user = "".join(char for char in str(android_user or DEFAULT_ANDROID_USER) if char.isalnum() or char in "-_")
+        return Path(get_settings().storage_dir) / "android" / "device-profiles" / f"{safe_serial}-u{safe_user}.json"
 
-    def ensure_calibrated(self, serial: str, device: dict[str, Any]) -> dict[str, Any]:
+    def ensure_calibrated(self, serial: str, device: dict[str, Any], android_user: str = DEFAULT_ANDROID_USER) -> dict[str, Any]:
         """Run a safe first-use UI walkthrough for each device/app version."""
-        profile_path = self._calibration_path(serial)
+        android_user = str(android_user or DEFAULT_ANDROID_USER)
+        profile_path = self._calibration_path(serial, android_user)
         profile: dict[str, Any] = {}
         if profile_path.is_file():
             try:
@@ -448,9 +577,10 @@ class AndroidXhsService:
             profile.get("schema") == 1
             and profile.get("model") == device.get("model")
             and profile.get("xiaohongshu_version") == device.get("xiaohongshu_version")
+            and str(profile.get("android_user") or DEFAULT_ANDROID_USER) == android_user
         ):
             return profile
-        calibrated = self._json("calibrate", "--serial", serial)
+        calibrated = self._json("calibrate", "--serial", serial, "--android-user", android_user)
         if not isinstance(calibrated, dict) or calibrated.get("status") != "calibrated":
             raise RuntimeError("新设备首次发布预检失败")
         profile_path.parent.mkdir(parents=True, exist_ok=True)
@@ -483,21 +613,40 @@ class AndroidXhsService:
             raise RuntimeError("至少需要一张图片")
         return images[:9]
 
-    def prepare(self, *, serial: str, user_id: int, job_id: int, assets: list[Any]) -> dict[str, Any]:
-        self.doctor(serial)
+    def prepare(self, *, serial: str, android_user: str = DEFAULT_ANDROID_USER, user_id: int, job_id: int, assets: list[Any]) -> dict[str, Any]:
+        self.doctor(serial, android_user)
         images = self.stage_images(user_id=user_id, job_id=job_id, assets=assets)
         remote_paths = self._run("push", "--serial", serial, *[str(path) for path in images]).splitlines()
-        self._run("open", "--serial", serial)
-        return {"image_count": len(images), "remote_paths": remote_paths}
+        self._run("open", "--serial", serial, "--android-user", str(android_user or DEFAULT_ANDROID_USER))
+        return {"image_count": len(images), "remote_paths": remote_paths, "android_user": str(android_user or DEFAULT_ANDROID_USER)}
 
-    def fill_for_review(self, *, serial: str, user_id: int, job_id: int, title: str, body: str) -> str:
+    def fill_for_review(
+        self,
+        *,
+        serial: str,
+        android_user: str = DEFAULT_ANDROID_USER,
+        user_id: int,
+        job_id: int,
+        title: str,
+        body: str,
+        topics: list[str] | None = None,
+    ) -> str:
         stage_dir = Path(get_settings().storage_dir) / "android" / f"u{user_id}" / f"job-{job_id}"
         stage_dir.mkdir(parents=True, exist_ok=True)
         title_file = stage_dir / "title.txt"
         body_file = stage_dir / "body.txt"
+        topics_file = stage_dir / "topics.json"
         title_file.write_text(title.strip(), encoding="utf-8")
         body_file.write_text(body.strip(), encoding="utf-8")
-        self._run("fill", "--serial", serial, "--title-file", str(title_file), "--body-file", str(body_file))
+        topics_file.write_text(json.dumps(topics or [], ensure_ascii=False), encoding="utf-8")
+        self._run(
+            "fill",
+            "--serial", serial,
+            "--android-user", str(android_user or DEFAULT_ANDROID_USER),
+            "--title-file", str(title_file),
+            "--body-file", str(body_file),
+            "--topics-file", str(topics_file),
+        )
         file_name = f"xhs-android-u{user_id}-job-{job_id}.png"
         output = self._media_dir() / file_name
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -508,38 +657,48 @@ class AndroidXhsService:
         self,
         *,
         serial: str,
+        android_user: str = DEFAULT_ANDROID_USER,
         user_id: int,
         job_id: int,
         assets: list[Any],
         title: str,
         body: str,
+        topics: list[str] | None = None,
         product_keyword: str = "",
+        scheduled_at: str | None = None,
     ) -> dict[str, Any]:
         """Push the reviewed payload and complete the phone UI publication."""
         if len(title.strip()) > 20:
             raise RuntimeError("小红书标题不能超过20个字符，请修改并重新审核后发布")
-        device = self.doctor(serial)
+        android_user = str(android_user or DEFAULT_ANDROID_USER)
+        device = self.doctor(serial, android_user)
         images = self.stage_images(user_id=user_id, job_id=job_id, assets=assets)
         remote_paths = self._run(
             "push", "--serial", serial, "--clear", *[str(path) for path in images],
         ).splitlines()
-        self.ensure_calibrated(serial, device)
+        self.ensure_calibrated(serial, device, android_user)
         stage_dir = Path(get_settings().storage_dir) / "android" / f"u{user_id}" / f"job-{job_id}"
         stage_dir.mkdir(parents=True, exist_ok=True)
         title_file = stage_dir / "title.txt"
         body_file = stage_dir / "body.txt"
+        topics_file = stage_dir / "topics.json"
         title_file.write_text(title.strip(), encoding="utf-8")
         body_file.write_text(body.strip(), encoding="utf-8")
+        topics_file.write_text(json.dumps(topics or [], ensure_ascii=False), encoding="utf-8")
         publish_args = [
             "publish",
             "--serial", serial,
             "--title-file", str(title_file),
             "--body-file", str(body_file),
+            "--topics-file", str(topics_file),
             "--image-count", str(len(images)),
+            "--android-user", android_user,
         ]
         if product_keyword.strip():
             publish_args.extend(["--product-keyword", product_keyword.strip()])
-        result = self._json(*publish_args)
-        if not isinstance(result, dict) or result.get("status") != "published":
-            raise RuntimeError("手机端未返回发布成功状态")
+        if scheduled_at and scheduled_at.strip():
+            publish_args.extend(["--scheduled-at", scheduled_at.strip()])
+        result = self._json(*publish_args, timeout=360)
+        if not isinstance(result, dict) or result.get("status") not in {"published", "scheduled"}:
+            raise RuntimeError("手机端未返回发布成功或定时提交状态")
         return {**result, "remote_paths": remote_paths}

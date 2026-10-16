@@ -1,6 +1,7 @@
 """阶段 C：设备助手。覆盖安卓脚本的仓库内自持（BUG-03）与网页内自助连机（C-02）。"""
 
 import urllib.error
+import threading
 import zipfile
 from pathlib import Path
 
@@ -25,6 +26,39 @@ def test_android_script_is_vendored_in_repo():
     script = VENDORED_DIR / "scripts" / "xhs_android.py"
     assert script.is_file(), f"缺少仓库内的安卓脚本：{script}"
     assert script.stat().st_size > 10_000, "脚本大小异常，可能是空占位文件"
+
+
+def test_android_publish_lock_serializes_same_physical_device():
+    """同一手机的两个发布调用必须排队，不能并发操作前台小红书。"""
+    from backend.app.services.android_xhs_service import android_device_publish_lock
+
+    first_entered = threading.Event()
+    release_first = threading.Event()
+    second_entered = threading.Event()
+    order: list[str] = []
+
+    def first() -> None:
+        with android_device_publish_lock("PHONE-SERIAL"):
+            order.append("first")
+            first_entered.set()
+            release_first.wait(timeout=2)
+
+    def second() -> None:
+        with android_device_publish_lock("PHONE-SERIAL"):
+            order.append("second")
+            second_entered.set()
+
+    worker_one = threading.Thread(target=first)
+    worker_two = threading.Thread(target=second)
+    worker_one.start()
+    assert first_entered.wait(timeout=1)
+    worker_two.start()
+    assert not second_entered.wait(timeout=0.1), "第二个任务不应抢占正在使用的手机"
+    release_first.set()
+    worker_one.join(timeout=2)
+    worker_two.join(timeout=2)
+
+    assert order == ["first", "second"]
 
 
 def test_android_setup_script_and_apk_are_vendored():
@@ -253,6 +287,19 @@ def test_adb_missing_error_points_to_web_wizard_not_command_line(isolated_servic
     assert "brew" not in text and "python3" not in text
 
 
+def test_json_forwards_extended_publish_timeout(isolated_service):
+    captured = []
+
+    def fake_run(*args, timeout=180):
+        captured.append((args, timeout))
+        return '{"status":"ok"}'
+
+    isolated_service._run = fake_run
+
+    assert isolated_service._json("publish", timeout=360) == {"status": "ok"}
+    assert captured == [(('publish',), 360)]
+
+
 def test_unknown_adb_install_task_is_rejected(isolated_service):
     with pytest.raises(RuntimeError, match="找不到该安装任务"):
         isolated_service.adb_install_status("does-not-exist")
@@ -452,6 +499,701 @@ def test_selectable_thumbnails_sorted_by_screen_position():
     assert descs == ["img1_1", "img1_2", "img2_1", "img2_2", "img3_1", "img3_2"], (
         f"缩略图应按屏幕位置排序，实际：{descs}"
     )
+
+
+def test_selectable_thumbnails_supports_720px_three_column_gallery():
+    """720px 屏幕的三列相册单格为 236px，不能继续用 250px 固定阈值。"""
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    container = ET.SubElement(root, "node", {"scrollable": "true", "bounds": "[0,252][720,1568]"})
+    for index, bounds in enumerate((
+        "[0,252][236,488]",
+        "[242,252][478,488]",
+        "[484,252][720,488]",
+        "[0,494][236,730]",
+    )):
+        ET.SubElement(container, "node", {
+            "clickable": "true",
+            "class": "android.widget.ImageView",
+            "bounds": bounds,
+            "content-desc": f"image-{index + 1}",
+        })
+    ET.SubElement(container, "node", {
+        "clickable": "true",
+        "class": "android.widget.ImageView",
+        "bounds": "[12,78][122,158]",
+        "content-desc": "关闭",
+    })
+
+    result = module.selectable_thumbnails(root)
+
+    assert [node.attrib["content-desc"] for node in result] == [
+        "image-1", "image-2", "image-3", "image-4",
+    ]
+
+
+def test_product_search_control_supports_720px_screen():
+    """商品搜索图标在 720px 屏幕的 x=660，不能用桌面宽屏坐标判断。"""
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    for text, bounds in (
+        ("普通商品", "[24,194][184,250]"),
+        ("店内爆品", "[184,194][344,250]"),
+        ("最新上架", "[344,194][504,250]"),
+        ("热门搜索", "[504,194][640,250]"),
+    ):
+        ET.SubElement(root, "node", {"text": text, "bounds": bounds})
+    search_icon = ET.SubElement(root, "node", {
+        "text": "",
+        "class": "android.widget.ImageView",
+        "clickable": "true",
+        "bounds": "[660,202][700,242]",
+    })
+
+    assert module.product_search_control(root) is search_icon
+
+
+def test_product_search_control_ignores_unrelated_icons():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    ET.SubElement(root, "node", {"text": "热门搜索", "bounds": "[504,194][640,250]"})
+    ET.SubElement(root, "node", {
+        "class": "android.widget.ImageView",
+        "clickable": "true",
+        "bounds": "[0,80][108,188]",
+    })
+
+    assert module.product_search_control(root) is None
+
+
+def test_product_result_node_ignores_search_input_and_accepts_full_title():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    ET.SubElement(root, "node", {
+        "text": "尹颜森林治愈系田园小碎花软毛牙刷",
+        "class": "android.widget.EditText",
+        "bounds": "[108,194][538,254]",
+    })
+    result = ET.SubElement(root, "node", {
+        "text": "Y.senlin 尹颜森林治愈系田园小碎花软毛牙刷20孔宽头牙刷高效清洁情侣成人",
+        "class": "android.widget.TextView",
+        "bounds": "[312,346][664,386]",
+    })
+
+    assert module.product_result_node(root, "尹颜森林治愈系田园小碎花软毛牙刷") is result
+
+
+def test_scroll_to_find_product_result_skips_search_input_and_scrolls(monkeypatch):
+    """商品名在后续虚拟列表页时仍应命中，而不是返回搜索框。"""
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    keyword = "尹颜森林治愈系田园小碎花软毛牙刷"
+    first = ET.Element("hierarchy")
+    ET.SubElement(first, "node", {
+        "scrollable": "true",
+        "bounds": "[0,300][720,1500]",
+    })
+    ET.SubElement(first, "node", {
+        "text": keyword,
+        "class": "android.widget.EditText",
+        "bounds": "[108,194][538,254]",
+    })
+    second = ET.Element("hierarchy")
+    container = ET.SubElement(second, "node", {
+        "scrollable": "true",
+        "bounds": "[0,300][720,1500]",
+    })
+    result = ET.SubElement(container, "node", {
+        "text": f"品牌 {keyword} 成人款",
+        "class": "android.widget.TextView",
+        "bounds": "[32,420][688,500]",
+    })
+    screens = iter([first, second])
+    swipes = []
+    monkeypatch.setattr(module, "dump_ui", lambda _serial: next(screens))
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: swipes.append(args))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    found, _ = module.scroll_to_find_product_result("SERIAL", keyword)
+
+    assert found is result
+    assert swipes, "商品结果不在首屏时必须滚动"
+
+
+def test_clickable_ancestor_uses_actual_overlay_branch():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    ET.SubElement(root, "node", {
+        "class": "android.view.ViewGroup",
+        "clickable": "true",
+        "bounds": "[32,266][688,474]",
+    })
+    overlay_card = ET.SubElement(root, "node", {
+        "class": "android.view.ViewGroup",
+        "clickable": "true",
+        "bounds": "[32,322][688,530]",
+    })
+    inner = ET.SubElement(overlay_card, "node", {"clickable": "false"})
+    result = ET.SubElement(inner, "node", {
+        "text": "Y.senlin 尹颜森林治愈系田园小碎花软毛牙刷",
+        "class": "android.widget.TextView",
+        "bounds": "[312,346][664,386]",
+    })
+
+    assert module.clickable_ancestor(root, result) is overlay_card
+
+
+def test_publish_page_detection_accepts_label_and_resource_id_variants():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    for attrs in (
+        {"text": "发布", "clickable": "false"},
+        {"content-desc": "发布笔记", "clickable": "true"},
+        {"resource-id": "com.xingin.xhs:id/a5t", "clickable": "false"},
+    ):
+        root = ET.Element("hierarchy")
+        ET.SubElement(root, "node", attrs)
+        assert module._is_publish_page(root)
+
+
+def test_selected_product_marker_accepts_new_ui_labels():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    marker = ET.SubElement(root, "node", {"text": "已选商品（1）"})
+    assert module._selected_product_marker(root) is marker
+
+
+def test_schedule_flow_finds_lower_advanced_options_and_direct_schedule_entry(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+
+    compose = ET.Element("hierarchy")
+    advanced = ET.SubElement(compose, "node", {
+        "text": "高级选项", "content-desc": "高级选项", "bounds": "[0,1200][720,1300]",
+    })
+    menu = ET.Element("hierarchy")
+    schedule = ET.SubElement(menu, "node", {
+        "text": "定时发布", "content-desc": "定时发布", "bounds": "[0,1000][720,1100]",
+    })
+    picker = ET.Element("hierarchy")
+    ET.SubElement(picker, "node", {"class": "android.widget.EditText", "hint": "日期", "bounds": "[0,0][100,100]"})
+    ET.SubElement(picker, "node", {"class": "android.widget.EditText", "hint": "时间", "bounds": "[100,0][200,100]"})
+    ET.SubElement(picker, "node", {"text": "确定", "clickable": "true", "bounds": "[600,0][720,100]"})
+    returned = ET.Element("hierarchy")
+    for label in ("商品", "文件", "引用笔记"):
+        ET.SubElement(returned, "node", {"text": label})
+
+    screens = iter((compose, menu, picker, picker, returned))
+    taps = []
+    monkeypatch.setattr(module, "scroll_to_find_node", lambda *args, **kwargs: advanced)
+    monkeypatch.setattr(module, "dump_ui", lambda serial: next(screens))
+    monkeypatch.setattr(module, "tap_node", lambda serial, node: taps.append(node.attrib.get("text")))
+    monkeypatch.setattr(module, "_fill_edit_text", lambda *args: None)
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.schedule_on_phone("SERIAL", "2026-09-05T05:00")
+
+    assert taps[:2] == ["高级选项", "定时发布"]
+    assert "确定" in taps
+
+
+def test_schedule_confirm_returns_from_component_sheet_to_compose(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    picker = ET.Element("hierarchy")
+    ET.SubElement(picker, "node", {"class": "android.widget.EditText", "hint": "日期", "bounds": "[0,0][100,100]"})
+    ET.SubElement(picker, "node", {"class": "android.widget.EditText", "hint": "时间", "bounds": "[100,0][200,100]"})
+    ET.SubElement(picker, "node", {"text": "确定", "clickable": "true", "bounds": "[600,0][720,100]"})
+    sheet = ET.Element("hierarchy")
+    ET.SubElement(sheet, "node", {"text": "商品"})
+    ET.SubElement(sheet, "node", {"text": "文件"})
+    ET.SubElement(sheet, "node", {"text": "引用笔记"})
+    ET.SubElement(sheet, "node", {"text": "活动"})
+    ET.SubElement(sheet, "node", {"class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[32,1012][688,1496]"})
+    compose = ET.Element("hierarchy")
+    ET.SubElement(compose, "node", {"resource-id": "com.xingin.xhs:id/b5i", "hint": "添加标题"})
+
+    entry = ET.Element("hierarchy")
+    ET.SubElement(entry, "node", {"text": "高级选项", "clickable": "true", "bounds": "[0,0][720,100]"})
+    menu = ET.Element("hierarchy")
+    ET.SubElement(menu, "node", {"text": "定时发布", "clickable": "true", "bounds": "[0,0][720,100]"})
+    screens = iter((entry, menu, picker, picker, sheet, compose))
+    taps = []
+    backs = []
+    monkeypatch.setattr(module, "dump_ui", lambda _serial: next(screens))
+    monkeypatch.setattr(module, "_fill_edit_text", lambda *args: None)
+    monkeypatch.setattr(module, "scroll_to_find_node", lambda *args, **kwargs: entry)
+    monkeypatch.setattr(module, "tap_node", lambda _serial, node: taps.append(node.attrib.get("text", "")))
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: backs.append(args) if args[-1] == "4" else None)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    module.schedule_on_phone("SERIAL", "2026-09-07T16:59")
+
+    assert "确定" in taps
+    assert backs, "确认后停在组件面板时必须返回正文编辑页"
+
+
+def test_schedule_wheel_selector_uses_visible_semantic_value(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    wheel = ET.SubElement(root, "node", {
+        "class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[0,100][200,500]",
+    })
+    row = ET.SubElement(wheel, "node", {
+        "text": "9月5日 周六", "clickable": "true", "bounds": "[0,260][200,340]",
+    })
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: pytest.fail("visible value should not swipe"))
+
+    selected = module._select_schedule_wheel("SERIAL", root, "9月5日", 0, date_value=True)
+
+    assert selected is row
+
+
+def test_schedule_wheel_selector_accepts_partially_clipped_row():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    wheel = ET.SubElement(root, "node", {
+        "class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[0,100][200,500]",
+    })
+    row = ET.SubElement(wheel, "node", {
+        "text": "46", "clickable": "true", "bounds": "[0,460][200,540]",
+    })
+
+    selected = module._select_schedule_wheel("SERIAL", root, "46", 0)
+
+    assert selected is row
+
+
+def test_schedule_wheel_selector_does_not_swipe_when_matching_text_has_bad_y_bounds():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    wheel = ET.SubElement(root, "node", {
+        "class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[400,100][600,500]",
+    })
+    ET.SubElement(wheel, "node", {
+        "text": "46", "clickable": "true", "bounds": "[450,1068][550,1047]",
+    })
+    calls = []
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: calls.append(args))
+        monkeypatch.setattr(module, "dump_ui", lambda _serial: root)
+        with pytest.raises(SystemExit, match="找不到目标时间项"):
+            module._select_schedule_wheel("SERIAL", root, "46", 0)
+    finally:
+        monkeypatch.undo()
+
+    assert calls, "倒置 bounds 不能被点击，应该继续滚动"
+
+
+def test_schedule_wheel_selector_orders_columns_by_horizontal_position():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    # Deliberately append minute, date, hour in unstable XML order.
+    for bounds, value in (("[469,100][688,500]", "59"), ("[32,100][251,500]", "9月7日"), ("[251,100][469,500]", "16")):
+        wheel = ET.SubElement(root, "node", {
+            "class": "android.widget.ScrollView", "scrollable": "true", "bounds": bounds,
+        })
+        ET.SubElement(wheel, "node", {"text": value, "clickable": "true", "bounds": bounds})
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: pytest.fail("all targets are visible"))
+        assert module._select_schedule_wheel("SERIAL", root, "9月7日", 0, date_value=True).attrib["text"] == "9月7日"
+        assert module._select_schedule_wheel("SERIAL", root, "16", 1).attrib["text"] == "16"
+        assert module._select_schedule_wheel("SERIAL", root, "59", 2).attrib["text"] == "59"
+    finally:
+        monkeypatch.undo()
+
+
+def test_schedule_wheel_selector_returns_leaf_clickable_ancestor_explicitly():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    wheel = ET.SubElement(root, "node", {
+        "class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[0,100][200,500]",
+    })
+    parent = ET.SubElement(wheel, "node", {
+        "class": "android.view.ViewGroup", "clickable": "true", "bounds": "[0,260][200,340]",
+    })
+    row = ET.SubElement(parent, "node", {
+        "text": "16", "class": "android.widget.TextView", "bounds": "[20,280][180,320]",
+    })
+
+    selected = module._select_schedule_wheel("SERIAL", root, "16", 0)
+
+    assert selected is parent
+
+
+def test_schedule_wheel_selector_falls_back_when_clickable_parent_bounds_inverted():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    wheel = ET.SubElement(root, "node", {
+        "class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[0,100][200,500]",
+    })
+    parent = ET.SubElement(wheel, "node", {
+        "class": "android.view.ViewGroup", "clickable": "true", "bounds": "[0,1068][200,108]",
+    })
+    row = ET.SubElement(parent, "node", {
+        "text": "16", "class": "android.widget.TextView", "bounds": "[20,280][180,320]",
+    })
+
+    selected = module._select_schedule_wheel("SERIAL", root, "16", 0)
+
+    assert selected is row
+
+
+def test_schedule_wheel_selector_reorders_wheels_after_each_scroll(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+
+    def screen(order, values):
+        root = ET.Element("hierarchy")
+        for bounds, value in zip(order, values):
+            wheel = ET.SubElement(root, "node", {
+                "class": "android.widget.ScrollView", "scrollable": "true", "bounds": bounds,
+            })
+            ET.SubElement(wheel, "node", {
+                "text": value, "clickable": "true", "bounds": bounds,
+            })
+        return root
+
+    # Initial XML order: date/hour/minute. After a scroll, XML order changes
+    # to minute/date/hour; horizontal ordering must still select the hour.
+    screens = iter([
+        screen(("[32,100][251,500]", "[251,100][469,500]", "[469,100][688,500]"), ("x", "15", "00")),
+        screen(("[469,100][688,500]", "[32,100][251,500]", "[251,100][469,500]"), ("00", "x", "16")),
+    ])
+    monkeypatch.setattr(module, "dump_ui", lambda _serial: next(screens))
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+
+    selected = module._select_schedule_wheel("SERIAL", screens.__next__(), "16", 1)
+
+    assert selected.attrib["text"] == "16"
+
+
+def test_publish_page_detection_accepts_scrolled_compose_toolbar():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    for label in ("商品", "引用笔记", "文件", "活动", "添加"):
+        ET.SubElement(root, "node", {"text": label})
+    assert module._is_publish_page(root)
+
+
+def test_scheduled_publish_button_accepts_phone_final_action_label():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    final_action = ET.SubElement(root, "node", {
+        "text": "定时发布",
+        "class": "android.widget.Button",
+        "clickable": "true",
+        "bounds": "[331,1434][688,1514]",
+    })
+
+    assert module._find_publish_button(root, scheduled=True) is final_action
+    assert module._find_publish_button(root, scheduled=False) is None
+
+
+def test_compose_page_detection_accepts_single_image_auto_editor():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    ET.SubElement(root, "node", {"resource-id": "com.xingin.xhs:id/b5i", "class": "android.widget.EditText"})
+    assert module._is_compose_page(root)
+
+
+def test_component_sheet_is_not_mistaken_for_compose_page():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    ET.SubElement(root, "node", {
+        "class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[32,1012][688,1496]",
+    })
+    for label in ("商品", "文件", "引用笔记", "活动"):
+        ET.SubElement(root, "node", {"text": label})
+
+    assert module._is_component_sheet(root)
+
+
+def test_compose_page_with_editor_fields_is_not_component_sheet():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    ET.SubElement(root, "node", {
+        "class": "android.widget.ScrollView", "scrollable": "true", "bounds": "[32,500][688,1496]",
+    })
+    ET.SubElement(root, "node", {"resource-id": "com.xingin.xhs:id/b5i", "hint": "添加标题"})
+    for label in ("商品", "文件", "引用笔记", "活动"):
+        ET.SubElement(root, "node", {"text": label})
+
+    assert module._is_compose_page(root)
+    assert not module._is_component_sheet(root)
+
+
+def test_topic_candidate_ignores_plain_editor_text():
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    root = ET.Element("hierarchy")
+    ET.SubElement(root, "node", {
+        "text": "牙刷推荐",
+        "class": "android.widget.EditText",
+    })
+    suggestion = ET.SubElement(root, "node", {
+        "text": "牙刷推荐",
+        "class": "android.widget.TextView",
+    })
+
+    assert module.topic_candidate(root, "牙刷推荐") is suggestion
+
+
+def test_topics_from_file_normalizes_deduplicates_and_limits(tmp_path):
+    import json
+
+    module = _load_android_script_module()
+    topics_file = tmp_path / "topics.json"
+    topics_file.write_text(
+        json.dumps(["#牙刷", "牙刷", " 口腔护理 ", *[f"话题{i}" for i in range(20)]], ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    result = module.topics_from_file(str(topics_file))
+
+    assert result[:2] == ["牙刷", "口腔护理"]
+    assert len(result) == 10
+
+
+def test_attach_topics_selects_suggestion_instead_of_leaving_plain_text(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+
+    def ui(*texts, body=None, done=False):
+        root = ET.Element("hierarchy")
+        if body is not None:
+            ET.SubElement(root, "node", {
+                "text": body,
+                "hint": "添加正文",
+                "class": "android.widget.EditText",
+                "bounds": "[0,410][720,742]",
+            })
+        for index, text in enumerate(texts):
+            ET.SubElement(root, "node", {
+                "text": text,
+                "class": "android.widget.TextView",
+                "bounds": f"[68,{800 + index * 72}][300,{860 + index * 72}]",
+            })
+        if done:
+            ET.SubElement(root, "node", {
+                "text": "完成",
+                "class": "android.widget.TextView",
+                "clickable": "true",
+                "bounds": "[634,630][710,702]",
+            })
+        return root
+
+    screens = iter([
+        ui("话题"),
+        ui("话题"),
+        ui("牙刷推荐", body="#"),
+        ui(body="#牙刷推荐 ", done=True),
+    ])
+    taps = []
+    cursor_moves = []
+    monkeypatch.setattr(module, "dump_ui", lambda _serial: next(screens))
+    monkeypatch.setattr(module, "current_ime", lambda _serial: "original/.Ime")
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "tap_node", lambda _serial, node: taps.append(node.attrib.get("text", "")))
+    monkeypatch.setattr(module, "broadcast_unicode", lambda *_args: pytest.fail("默认候选存在时不应输入普通文本"))
+    monkeypatch.setattr(module, "move_body_cursor_to_end", lambda serial: cursor_moves.append(serial))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    result = module.attach_topics("SERIAL", ["牙刷推荐"])
+
+    assert taps == ["话题", "牙刷推荐", "完成"]
+    assert cursor_moves == ["SERIAL"]
+    assert result == {"bound": ["牙刷推荐"], "skipped": []}
+
+
+def test_attach_topics_positions_long_body_cursor_only_once(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+
+    def node(text):
+        return ET.Element("node", {
+            "text": text,
+            "class": "android.widget.TextView",
+            "bounds": "[68,800][300,860]",
+        })
+
+    initial = ET.Element("hierarchy")
+    first_suggestion = ET.Element("hierarchy")
+    first_suggestion.append(node("牙刷"))
+    second_suggestion = ET.Element("hierarchy")
+    second_suggestion.append(node("口腔护理"))
+    screens = iter([initial, first_suggestion, second_suggestion])
+    cursor_moves = []
+    monkeypatch.setattr(module, "dump_ui", lambda _serial: next(screens))
+    monkeypatch.setattr(module, "current_ime", lambda _serial: "original/.Ime")
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "tap_node", lambda *_args: None)
+    monkeypatch.setattr(module, "move_body_cursor_to_end", lambda serial: cursor_moves.append(serial))
+    monkeypatch.setattr(
+        module,
+        "wait_node",
+        lambda _serial, *, texts, **_kwargs: node("话题" if texts == ("话题",) else "完成"),
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    result = module.attach_topics("SERIAL", ["牙刷", "口腔护理"])
+
+    assert result == {"bound": ["牙刷", "口腔护理"], "skipped": []}
+    assert cursor_moves == ["SERIAL"]
+
+
+def test_attach_topics_skips_missing_exact_candidate_and_continues(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+
+    def ui(*texts, body=None, done=False):
+        root = ET.Element("hierarchy")
+        if body is not None:
+            ET.SubElement(root, "node", {
+                "text": body,
+                "hint": "添加正文",
+                "class": "android.widget.EditText",
+                "bounds": "[0,410][720,742]",
+            })
+        for index, text in enumerate(texts):
+            ET.SubElement(root, "node", {
+                "text": text,
+                "class": "android.widget.TextView",
+                "bounds": f"[68,{800 + index * 72}][300,{860 + index * 72}]",
+            })
+        if done:
+            ET.SubElement(root, "node", {
+                "text": "完成",
+                "class": "android.widget.TextView",
+                "clickable": "true",
+                "bounds": "[634,630][710,702]",
+            })
+        return root
+
+    screens = iter([
+        ui("话题"),
+        ui("话题"),
+        ui("其他候选", body="#"),
+        ui("话题"),
+        ui("话题"),
+        ui("牙刷", body="#"),
+        ui(body="#牙刷 ", done=True),
+    ])
+    monkeypatch.setattr(module, "dump_ui", lambda _serial: next(screens))
+    monkeypatch.setattr(module, "current_ime", lambda _serial: "original/.Ime")
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, "tap_node", lambda *_args: None)
+    monkeypatch.setattr(module, "broadcast_unicode", lambda *_args: None)
+    monkeypatch.setattr(module, "move_body_cursor_to_end", lambda _serial: None)
+    monkeypatch.setattr(
+        module,
+        "wait_topic_candidate",
+        lambda _serial, _topic: (None, ui("仍非精确候选", body="#不存在话题")),
+    )
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    result = module.attach_topics("SERIAL", ["不存在话题", "牙刷"])
+
+    assert result == {"bound": ["牙刷"], "skipped": ["不存在话题"]}
+
+
+def test_move_body_cursor_to_end_uses_android_end_key(monkeypatch):
+    import xml.etree.ElementTree as ET
+
+    module = _load_android_script_module()
+    editor = ET.Element("hierarchy")
+    body = ET.SubElement(editor, "node", {
+        "text": "很长的正文，当前光标可能在中间",
+        "hint": "添加正文",
+        "class": "android.widget.EditText",
+        "bounds": "[0,470][720,802]",
+    })
+    expanded = ET.Element("hierarchy")
+    done = ET.SubElement(expanded, "node", {
+        "text": "完成",
+        "class": "android.widget.TextView",
+        "clickable": "true",
+        "bounds": "[634,630][710,702]",
+    })
+    screens = iter([editor, expanded])
+    taps = []
+    adb_calls = []
+    monkeypatch.setattr(module, "dump_ui", lambda _serial: next(screens))
+    monkeypatch.setattr(module, "tap_node", lambda _serial, node: taps.append(node))
+    monkeypatch.setattr(module, "run_adb", lambda *args, **kwargs: adb_calls.append(args))
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+
+    module.move_body_cursor_to_end("SERIAL")
+
+    assert taps == [body, done]
+    assert any(call[-120:] == ("20",) * 120 for call in adb_calls)
+    assert any(call[-2:] == ("keyevent", "123") for call in adb_calls)
+
+
+def test_android_topics_prefers_reviewed_topics_and_falls_back_to_draft_tags():
+    import json
+    from types import SimpleNamespace
+
+    from backend.app.api.publish import _android_topics
+
+    reviewed = SimpleNamespace(publish_options=json.dumps({"topics": ["#牙刷", "口腔护理"]}))
+    fallback = SimpleNamespace(publish_options=json.dumps({
+        "draft_tags": [
+            {"id": "topic-1", "name": "牙刷推荐"},
+            {"id": "topic-2", "name": "软毛牙刷"},
+            {"id": "", "name": "AI自造但不存在的话题"},
+        ],
+    }))
+
+    assert _android_topics(reviewed) == ["牙刷", "口腔护理"]
+    assert _android_topics(fallback) == ["牙刷推荐", "软毛牙刷"]
 
 
 def test_android_setup_endpoints_require_authentication(api):

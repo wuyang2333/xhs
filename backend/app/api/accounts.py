@@ -41,6 +41,7 @@ class CookieImportRequest(BaseModel):
 class AndroidBindRequest(BaseModel):
     serial: str = Field(min_length=2, max_length=160)
     nickname: str = Field(default="", max_length=128)
+    android_user: str = Field(default="0", pattern=r"^\d{1,6}$")
 
 
 class AndroidSerialRequest(BaseModel):
@@ -66,6 +67,15 @@ def get_xhs_self_profile_adapter() -> XhsSelfProfileAdapter:
 
 def get_android_xhs_service() -> AndroidXhsService:
     return AndroidXhsService()
+
+
+def _android_user_from_account(account: PlatformAccount) -> str:
+    try:
+        profile = json.loads(account.profile_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        profile = {}
+    value = profile.get("android_user") if isinstance(profile, dict) else None
+    return str(value or "0")
 
 
 def _select_adapter(sub_type: str, pc_adapter: XhsPcLoginAdapter, creator_adapter: XhsCreatorLoginAdapter):
@@ -138,6 +148,19 @@ def android_setup_status(
     return android_service.setup_status(serial)
 
 
+@router.get("/android/users")
+def android_users(
+    serial: str = Query(..., min_length=2, max_length=160),
+    current_user: User = Depends(get_current_user),
+    android_service: AndroidXhsService = Depends(get_android_xhs_service),
+):
+    del current_user
+    try:
+        return {"items": android_service.android_users(serial)}
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
 @router.post("/android/setup-adb")
 def android_setup_adb(
     current_user: User = Depends(get_current_user),
@@ -186,19 +209,38 @@ def bind_android_account(
     android_service: AndroidXhsService = Depends(get_android_xhs_service),
 ):
     try:
-        device = android_service.doctor(payload.serial)
+        device = android_service.doctor(payload.serial, payload.android_user)
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     if not device.get("xiaohongshu_installed"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="目标手机未安装小红书")
 
-    account = db.scalar(
+    # Read the account identity from the selected Android user space. Binding
+    # a device without this check would only save a phone model as the name and
+    # could make two app clones indistinguishable in the account matrix.
+    profile_scan: dict = {}
+    try:
+        profile_scan = android_service.scan_profile(payload.serial, payload.android_user, max_scrolls=0)
+    except Exception as exc:
+        profile_scan = {"error": str(exc)}
+    scanned_profile = profile_scan.get("profile") if isinstance(profile_scan, dict) else {}
+    scanned_profile = scanned_profile if isinstance(scanned_profile, dict) else {}
+    scanned_nickname = str(scanned_profile.get("nickname") or "").strip()
+    scanned_red_id = str(scanned_profile.get("red_id") or "").strip()
+
+    # A single phone can host multiple Android user spaces (for example 0 and
+    # 999/XSpace). Keep one account record per space in profile_json.
+    accounts = db.scalars(
         select(PlatformAccount).where(
             PlatformAccount.user_id == current_user.id,
             PlatformAccount.platform == "xhs",
             PlatformAccount.sub_type == "android",
             PlatformAccount.external_user_id == payload.serial,
         )
+    ).all()
+    account = next(
+        (item for item in accounts if _android_user_from_account(item) == payload.android_user),
+        None,
     )
     action = "updated" if account else "created"
     now = shanghai_now()
@@ -211,9 +253,16 @@ def bind_android_account(
             created_at=now,
         )
         db.add(account)
-    account.nickname = payload.nickname.strip() or account.nickname or f"{device.get('manufacturer', 'Android')} {device.get('model', '手机')}"
+    account.nickname = payload.nickname.strip() or scanned_nickname or account.nickname or f"{device.get('manufacturer', 'Android')} {device.get('model', '手机')}"
     account.status = "active"
-    account.status_message = "已连接：在手机小红书中确认登录后可用于发布"
+    account.status_message = (
+        "已连接：已读取当前小红书账号"
+        if scanned_nickname
+        else "设备已连接，但未读取到小红书账号名；请确认该分身已登录后重新绑定或填写备注"
+    )
+    device["android_user"] = payload.android_user
+    device["profile_scan_error"] = profile_scan.get("error", "") if isinstance(profile_scan, dict) else ""
+    device["xhs_profile"] = {"nickname": scanned_nickname, "red_id": scanned_red_id}
     account.profile_json = json.dumps(device, ensure_ascii=False, separators=(",", ":"))
     account.updated_at = now
     db.commit()
@@ -279,9 +328,30 @@ def check_account(
 
     if account.sub_type == "android":
         try:
-            device = AndroidXhsService().doctor(account.external_user_id or "")
+            android_service = AndroidXhsService()
+            android_user = _android_user_from_account(account)
+            device = android_service.doctor(account.external_user_id or "", android_user)
             account.status = "active" if device.get("xiaohongshu_installed") else "risk"
-            account.status_message = "设备已连接" if account.status == "active" else "手机未安装小红书"
+            if account.status == "active":
+                try:
+                    scan = android_service.scan_profile(
+                        account.external_user_id or "", android_user,
+                        max_scrolls=0, resume=False, identity_only=True,
+                    )
+                    scanned = scan.get("profile") if isinstance(scan, dict) else {}
+                    if isinstance(scanned, dict):
+                        nickname = str(scanned.get("nickname") or "").strip()
+                        if nickname:
+                            account.nickname = nickname
+                        device["xhs_profile"] = {
+                            "nickname": nickname,
+                            "red_id": str(scanned.get("red_id") or "").strip(),
+                        }
+                    account.status_message = "设备已连接，已读取当前小红书账号" if account.nickname else "设备已连接，但未读取到小红书账号名"
+                except Exception as exc:
+                    account.status_message = f"设备已连接，但账号名读取失败：{exc}"
+            else:
+                account.status_message = "手机未安装小红书"
             account.profile_json = json.dumps(device, ensure_ascii=False, separators=(",", ":"))
         except Exception as exc:
             account.status = "expired"

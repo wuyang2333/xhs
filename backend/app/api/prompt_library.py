@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 from backend.app.core.database import get_db
 from backend.app.core.deps import get_current_user
@@ -41,6 +41,10 @@ class UsagePayload(BaseModel):
     outcome: dict = {}
 
 
+class RestoreVersionPayload(BaseModel):
+    change_note: str = Field(default="", max_length=500)
+
+
 class ObsidianConfigPayload(BaseModel):
     vault_path: str = Field(min_length=1, max_length=2000)
 
@@ -65,6 +69,52 @@ def _item(row: PromptTemplate) -> dict:
         "tags": json.loads(row.tags_json or "[]"), "content": row.content, "status": row.status,
         "priority": row.priority, "current_version": row.current_version, "source_type": row.source_type,
         "source_ref": row.source_ref, "created_at": row.created_at, "updated_at": row.updated_at}
+
+
+def _match_item(row: PromptTemplate, *, account_id: int | None = None,
+                product_id: int | None = None, scene_id: int | None = None,
+                scene: str = "", product_name: str = "", scene_name: str = "") -> dict:
+    """Serialize a prompt and explain why it matches the supplied context.
+
+    Exact entity bindings outrank generic prompts. Free-text scenes are a softer
+    signal, while priority remains useful inside the same specificity tier.
+    """
+    item = _item(row)
+    reasons: list[str] = []
+    specificity = 0
+    if account_id is not None and row.platform_account_id == account_id:
+        reasons.append("该账号专属")
+        specificity += 4
+    if product_id is not None and row.product_id == product_id:
+        reasons.append(f"匹配产品：{product_name}" if product_name else "匹配产品")
+        specificity += 3
+    if scene_id is not None and row.scene_id == scene_id:
+        reasons.append(f"匹配场景：{scene_name}" if scene_name else "匹配场景")
+        specificity += 2
+
+    needle = scene.strip().casefold()
+    if needle:
+        matched_scene = next((value for value in item["scenes"]
+                              if needle in str(value).casefold() or str(value).casefold() in needle), None)
+        if matched_scene is not None:
+            reasons.append(f"匹配关键词：{matched_scene}")
+            specificity += 1
+    if not reasons and row.platform_account_id is None and row.product_id is None and row.scene_id is None:
+        reasons.append("全局通用")
+
+    # specificity is intentionally dominant over the bounded [-100, 100] priority.
+    item["match_reasons"] = reasons
+    item["match_score"] = specificity * 1000 + row.priority
+    return item
+
+
+def _context_names(db: Session, user_id: int, product_id: int | None,
+                   scene_id: int | None) -> tuple[str, str]:
+    product = db.get(Product, product_id) if product_id is not None else None
+    scene = db.get(AssetScene, scene_id) if scene_id is not None else None
+    product_name = product.name if product and product.user_id == user_id else ""
+    scene_name = scene.name if scene and scene.user_id == user_id else ""
+    return product_name, scene_name
 
 
 def _owned_product(db: Session, user_id: int, product_id: int | None) -> None:
@@ -136,8 +186,39 @@ def list_prompts(prompt_type: str | None = None, account_id: int | None = None, 
     if product_id: stmt = stmt.where(or_(PromptTemplate.product_id.is_(None), PromptTemplate.product_id == product_id))
     if scene_id: stmt = stmt.where(or_(PromptTemplate.scene_id.is_(None), PromptTemplate.scene_id == scene_id))
     if is_official is not None: stmt = stmt.where(PromptTemplate.is_official.is_(is_official))
-    rows = db.scalars(stmt.order_by(PromptTemplate.priority.desc(), PromptTemplate.updated_at.desc())).all()
-    return {"items": [_item(row) for row in rows]}
+    rows = db.scalars(stmt).all()
+    product_name, scene_name = _context_names(db, current_user.id, product_id, scene_id)
+    items = [_match_item(row, account_id=account_id, product_id=product_id, scene_id=scene_id,
+                         product_name=product_name, scene_name=scene_name) for row in rows]
+    # Context-specific prompts appear before generic prompts; priority and recency
+    # break ties. With no context this preserves the prior priority-first behavior.
+    items.sort(key=lambda item: (item["match_score"], item["updated_at"]), reverse=True)
+    return {"items": items}
+
+
+@router.get("/recommend/match")
+def recommend(prompt_type: str, account_id: int | None = None, product_id: int | None = None,
+              scene_id: int | None = None, scene: str = "", current_user: User = Depends(get_current_user),
+              db: Session = Depends(get_db)):
+    # Keep this static route above every /{prompt_id}/... GET route. Otherwise
+    # FastAPI may try to parse "recommend" as an integer prompt id and return 422.
+    rows = list_prompts(
+        prompt_type=prompt_type, account_id=account_id, status="active",
+        current_user=current_user, db=db,
+    )["items"]
+    product_name, scene_name = _context_names(db, current_user.id, product_id, scene_id)
+    # 产品/场景是推荐条件，不是权限或硬筛选条件；保留其他产品/场景的指令供用户手动选择。
+    # 账号仍是适用范围，所以 list_prompts 继续按账号排除其他账号的专属指令。
+    model_rows = {row.id: row for row in db.scalars(select(PromptTemplate).where(
+        PromptTemplate.user_id == current_user.id,
+        PromptTemplate.id.in_([item["id"] for item in rows]) if rows else False,
+    )).all()}
+    rows = [_match_item(model_rows[item["id"]], account_id=account_id, product_id=product_id,
+                        scene_id=scene_id, scene=scene, product_name=product_name,
+                        scene_name=scene_name) for item in rows]
+    rows.sort(key=lambda item: (item["match_score"], item["updated_at"]), reverse=True)
+    # 选择器需要保留全部可用指令；只返回前 10 条会让其余指令无法被手动选择。
+    return {"item": rows[0] if rows else None, "candidates": rows}
 
 
 @router.post("")
@@ -185,22 +266,92 @@ def versions(prompt_id: int, current_user: User = Depends(get_current_user), db:
     row = db.get(PromptTemplate, prompt_id)
     if not row or row.user_id != current_user.id: raise HTTPException(404, "指令不存在")
     items = db.scalars(select(PromptVersion).where(PromptVersion.prompt_template_id == row.id).order_by(PromptVersion.version.desc())).all()
-    return {"items": [{"id": x.id, "version": x.version, "content": x.content, "change_note": x.change_note,
-                       "created_by": x.created_by, "approved": x.approved, "created_at": x.created_at} for x in items]}
+    return {"current_version": row.current_version,
+            "items": [{"id": x.id, "version": x.version, "content": x.content, "change_note": x.change_note,
+                       "created_by": x.created_by, "approved": x.approved, "created_at": x.created_at,
+                       "is_current": x.version == row.current_version} for x in items]}
 
 
-@router.get("/recommend/match")
-def recommend(prompt_type: str, account_id: int | None = None, scene: str = "", current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    # 必须用关键字传参。此前是位置传参，B-01 在中间插入 product_id / scene_id /
-    # is_official 三个参数后，current_user 与 db 会被错位塞进前两个。
-    rows = list_prompts(
-        prompt_type=prompt_type, account_id=account_id, status="active",
-        current_user=current_user, db=db,
-    )["items"]
-    def score(item):
-        scenes = item["scenes"]; return (1000 if item["platform_account_id"] == account_id else 0) + (200 if scene and scene in scenes else 0) + item["priority"]
-    rows.sort(key=score, reverse=True)
-    return {"item": rows[0] if rows else None, "candidates": rows[:10]}
+@router.get("/{prompt_id}/versions/{version}")
+def version_detail(prompt_id: int, version: int, current_user: User = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    row = db.get(PromptTemplate, prompt_id)
+    if not row or row.user_id != current_user.id:
+        raise HTTPException(404, "指令不存在")
+    item = db.scalar(select(PromptVersion).where(
+        PromptVersion.prompt_template_id == row.id, PromptVersion.version == version,
+    ))
+    if item is None:
+        raise HTTPException(404, "版本不存在")
+    return {"id": item.id, "version": item.version, "content": item.content,
+            "change_note": item.change_note, "created_by": item.created_by,
+            "approved": item.approved, "created_at": item.created_at,
+            "is_current": item.version == row.current_version}
+
+
+@router.post("/{prompt_id}/versions/{version}/restore")
+def restore_version(prompt_id: int, version: int, payload: RestoreVersionPayload | None = None,
+                    current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = db.get(PromptTemplate, prompt_id)
+    if not row or row.user_id != current_user.id:
+        raise HTTPException(404, "指令不存在")
+    old = db.scalar(select(PromptVersion).where(
+        PromptVersion.prompt_template_id == row.id, PromptVersion.version == version,
+    ))
+    if old is None:
+        raise HTTPException(404, "版本不存在")
+    new_version = row.current_version + 1
+    row.current_version = new_version
+    row.content = old.content
+    row.source_hash = hashlib.sha256(old.content.encode()).hexdigest()
+    row.is_official = False
+    row.updated_at = shanghai_now()
+    note = payload.change_note.strip() if payload and payload.change_note.strip() else f"恢复自 v{version}"
+    db.add(PromptVersion(prompt_template_id=row.id, version=new_version, content=old.content,
+                         change_note=note, created_by="human", approved=True))
+    db.commit(); db.refresh(row)
+    return {**_item(row), "restored_from_version": version}
+
+
+@router.post("/{prompt_id}/archive")
+def archive_prompt(prompt_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = db.get(PromptTemplate, prompt_id)
+    if not row or row.user_id != current_user.id:
+        raise HTTPException(404, "指令不存在")
+    row.status = "archived"
+    row.updated_at = shanghai_now()
+    db.commit(); db.refresh(row)
+    return _item(row)
+
+
+@router.post("/{prompt_id}/activate")
+def activate_prompt(prompt_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = db.get(PromptTemplate, prompt_id)
+    if not row or row.user_id != current_user.id:
+        raise HTTPException(404, "指令不存在")
+    row.status = "active"
+    row.updated_at = shanghai_now()
+    db.commit(); db.refresh(row)
+    return _item(row)
+
+
+@router.delete("/{prompt_id}")
+def delete_prompt(prompt_id: int, current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Permanently delete only prompts that have never been used.
+
+    Usage records are audit data and retain the exact version used. A used prompt
+    must therefore be archived instead of deleting that history.
+    """
+    row = db.get(PromptTemplate, prompt_id)
+    if not row or row.user_id != current_user.id:
+        raise HTTPException(404, "指令不存在")
+    usage_id = db.scalar(select(PromptUsage.id).where(PromptUsage.prompt_template_id == row.id).limit(1))
+    if usage_id is not None:
+        raise HTTPException(409, "该指令已有使用记录，不能永久删除，请改为归档")
+    db.execute(delete(PromptVersion).where(PromptVersion.prompt_template_id == row.id))
+    db.delete(row)
+    db.commit()
+    return {"id": prompt_id, "status": "deleted"}
 
 
 @router.post("/usages")

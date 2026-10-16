@@ -17,3 +17,8 @@ def test_parse_args_accepts_frontend_flag():
 def test_build_frontend_command_uses_resolved_npm_executable():
     command = main.build_frontend_command(5174, npm_executable="C:/node/npm.cmd")
     assert command == ["C:/node/npm.cmd", "run", "dev", "--", "--host", "127.0.0.1", "--port", "5174"]
+
+
+def test_build_frontend_command_accepts_lan_bind_host():
+    command = main.build_frontend_command(5173, npm_executable="C:/node/npm.cmd", host="0.0.0.0")
+    assert command == ["C:/node/npm.cmd", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]

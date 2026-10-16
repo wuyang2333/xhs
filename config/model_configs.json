@@ -4,7 +4,7 @@
     "model_type": "text",
     "provider": "openai-compatible",
     "model_name": "gpt-5.6-sol",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqauaVf_3UKthZSSCA29OhPBLjvAKiSHVZ8GNN6-V0u5cTusRC9XfTagCV5PFVCLC9CkQfhVzybn3_Oia3h6BKoO2Q2oVj6wYbahxFRwXXGOCFjf02lWQuAq4JJ80jzLRO8vJuIlwuAV4M5iiHQazowwKHbQ==",
     "is_default": false
   },
@@ -13,7 +13,7 @@
     "model_type": "text",
     "provider": "openai-compatible",
     "model_name": "claude-opus-5",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqaubQhTMvDHuBDl7oFRYhERfWtzW_vTD2YzHaoiKalJ1hSEIBalN4TUcia2c_CVDR0oy2vilGVthX3Ymez5igS9s_g39ZTxElTwoC5sKRq2N2aykbG-5mjt7pFBtggtbwhb9tJZc-i9endPM7XUgV6wZNww==",
     "is_default": false
   },
@@ -22,7 +22,7 @@
     "model_type": "text",
     "provider": "openai-compatible",
     "model_name": "gpt-5.3-codex",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqaumJRki7CFk6xEX2drUumiXYS0W_R-U8U3AC6NHyKCMWrPvLEgXTEGwtpHupwcEtMeZCkDaAebndh08-1hGJHcHwVS5QAwdEFeL_Exf7cJI60WUI1zBzVXx6vYzR61zChnYl8bgZQmC2hF5ZMspoq2oSew==",
     "is_default": false
   },
@@ -31,7 +31,7 @@
     "model_type": "text",
     "provider": "openai-compatible",
     "model_name": "claude-opus-4-8",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqaumLu8MwYkWmoz4rol-hGUmz6Fyf1V7miQgGLk5NrAaf3gIDsBsf4tYashlEgkwQGzArI-_mOurR3xZMSPVaDLBLM6oGCerHgkyU1LGGwL2RN6w4pf9McQxyUHcBMQID2_bi2dx8sHbx2PEXN8ewJWVzqg==",
     "is_default": false
   },
@@ -40,7 +40,7 @@
     "model_type": "text",
     "provider": "openai-compatible",
     "model_name": "claude-sonnet-5",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqaumMEtu7UBFBrcOFqiES7q8rRlxuYFeILtQlbXwOfDLk7aB4KSTCVd88NCRnnOJ_h0xZDBPK8rvVP3fG879WN-z8i1wUJieIsX7a_bBQ8YohDJzjPaBRyPuLpRlW-Spt1owBJ9GgPMLMiFE7114Tl0Y9kw==",
     "is_default": false
   },
@@ -49,7 +49,7 @@
     "model_type": "text",
     "provider": "openai-compatible",
     "model_name": "gemini-3.6-flash",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqaumOpVSVniijzxVgzYq3AblmkqMVH7nZI12TasbYFESFokoRtgPZjufnc7ggF9kZx17AGyr0c-5v0ngYiQCqr9w6ocTFgx3oDlEi8cDrwdkzJYq9UzVEQlbOgrmA_sdwGTLkTJQF5kjL7F6A55nnfd3A2Q==",
     "is_default": false
   },
@@ -58,7 +58,7 @@
     "model_type": "text",
     "provider": "openai-compatible",
     "model_name": "grok-4.5",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqaumR7TQyxt7igxjoLrHaXTqAHJlRvzD0PKbWqAJcWqlVNSQpoBi_eoPRfOYOXWXBVXyh1966LaPzbkmoir-ecnNH-i5K04FVF9p7BH0Uk9rDM77z_bgdWiW5mXhozzJRcdyKqsLeQ52HWgi_vgCbda850g==",
     "is_default": false
   },
@@ -67,7 +67,7 @@
     "model_type": "image",
     "provider": "openai-compatible",
     "model_name": "gpt-image-2",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqauaVf_3UKthZSSCA29OhPBLjvAKiSHVZ8GNN6-V0u5cTusRC9XfTagCV5PFVCLC9CkQfhVzybn3_Oia3h6BKoO2Q2oVj6wYbahxFRwXXGOCFjf02lWQuAq4JJ80jzLRO8vJuIlwuAV4M5iiHQazowwKHbQ==",
     "is_default": false
   },
@@ -76,7 +76,7 @@
     "model_type": "image",
     "provider": "openai-compatible",
     "model_name": "gpt-image-2-c",
-    "base_url": "https://4sapi.com/v1",
+    "base_url": "https://4sapi.org/v1",
     "encrypted_api_key": "gAAAAABqauaVf_3UKthZSSCA29OhPBLjvAKiSHVZ8GNN6-V0u5cTusRC9XfTagCV5PFVCLC9CkQfhVzybn3_Oia3h6BKoO2Q2oVj6wYbahxFRwXXGOCFjf02lWQuAq4JJ80jzLRO8vJuIlwuAV4M5iiHQazowwKHbQ==",
     "is_default": false
   },

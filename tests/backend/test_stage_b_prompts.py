@@ -83,6 +83,19 @@ def _create_prompt(token, name, **extra):
     return response.json()
 
 
+def _create_account(username, nickname):
+    from sqlalchemy import select
+    from backend.app.models import PlatformAccount, User
+
+    with _TestingSessionLocal() as db:
+        user = db.scalar(select(User).where(User.username == username))
+        row = PlatformAccount(user_id=user.id, platform="xhs", sub_type="pc", nickname=nickname)
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {"id": row.id, "nickname": row.nickname}
+
+
 def test_account_filter_includes_unbound_prompts(isolated_api):
     """BUG-11：原来写成 in_([None, account_id])，而 SQL 里 IN (NULL, x) 永远匹配不到
     NULL 行，导致按账号筛选时通用指令一条也带不回来。"""
@@ -181,6 +194,47 @@ def test_default_persona_still_applies_when_no_override(isolated_api):
     assert "提升表达" in captured["user"]
 
 
+def test_rewrite_note_returns_body_only_when_model_adds_title_and_tags(isolated_api):
+    from backend.app.services.ai_service import OpenAICompatibleTextClient
+
+    class Probe(OpenAICompatibleTextClient):
+        def _complete(self, *, model_config, api_key, system_prompt, user_prompt):
+            assert "只输出改写后的正文内容" in user_prompt
+            return (
+                "标题：新标题不应进入正文\n\n"
+                "正文：第一段正文。\n\n第二段正文。\n\n"
+                "标签：#牙刷 #口腔护理"
+            )
+
+    result = Probe().rewrite_note(
+        model_config=None,
+        api_key="k",
+        title="原标题",
+        body="原正文",
+        instruction="更自然",
+    )
+
+    assert result == "第一段正文。\n\n第二段正文。"
+
+
+def test_rewrite_note_removes_trailing_hashtag_block_without_sections(isolated_api):
+    from backend.app.services.ai_service import OpenAICompatibleTextClient
+
+    class Probe(OpenAICompatibleTextClient):
+        def _complete(self, *, model_config, api_key, system_prompt, user_prompt):
+            return "改写后的第一段。\n\n改写后的第二段。\n\n#牙刷 #口腔护理 #好物推荐"
+
+    result = Probe().rewrite_note(
+        model_config=None,
+        api_key="k",
+        title="原标题",
+        body="原正文",
+        instruction="",
+    )
+
+    assert result == "改写后的第一段。\n\n改写后的第二段。"
+
+
 def test_prompt_can_bind_product_and_scene(isolated_api):
     token = _token("stage-b-bind")
     product = _create_product(token, "坐浴盆")
@@ -262,3 +316,118 @@ def test_is_official_filter_separates_template_sources(isolated_api):
 
     assert {item["id"] for item in official_only.json()["items"]} == {official["id"]}
     assert {item["id"] for item in customer_only.json()["items"]} == {mine["id"]}
+
+
+def test_archive_hides_prompt_and_activate_restores_it(isolated_api):
+    token = _token("stage-b-archive")
+    created = _create_prompt(token, "待归档指令")
+
+    archived = client.post(f"/api/prompt-library/{created['id']}/archive", headers=_headers(token))
+    assert archived.status_code == 200, archived.text
+    assert archived.json()["status"] == "archived"
+    assert created["id"] not in {item["id"] for item in client.get(
+        "/api/prompt-library", headers=_headers(token),
+    ).json()["items"]}
+    archived_list = client.get("/api/prompt-library?status=archived", headers=_headers(token))
+    assert created["id"] in {item["id"] for item in archived_list.json()["items"]}
+
+    activated = client.post(f"/api/prompt-library/{created['id']}/activate", headers=_headers(token))
+    assert activated.status_code == 200, activated.text
+    assert activated.json()["status"] == "active"
+
+
+def test_delete_unused_prompt_but_reject_delete_after_usage(isolated_api):
+    token = _token("stage-b-safe-delete")
+    unused = _create_prompt(token, "从未使用")
+    deleted = client.delete(f"/api/prompt-library/{unused['id']}", headers=_headers(token))
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json() == {"id": unused["id"], "status": "deleted"}
+    assert client.get(f"/api/prompt-library/{unused['id']}/versions", headers=_headers(token)).status_code == 404
+
+    used = _create_prompt(token, "已经使用")
+    usage = client.post("/api/prompt-library/usages", headers=_headers(token), json={
+        "prompt_template_id": used["id"], "module": "draft_studio",
+    })
+    assert usage.status_code == 200, usage.text
+    rejected = client.delete(f"/api/prompt-library/{used['id']}", headers=_headers(token))
+    assert rejected.status_code == 409
+    assert "归档" in rejected.json()["detail"]
+    assert client.post(f"/api/prompt-library/{used['id']}/archive", headers=_headers(token)).status_code == 200
+
+
+def test_restore_old_version_creates_new_version_and_keeps_history(isolated_api):
+    token = _token("stage-b-version-restore")
+    created = _create_prompt(token, "版本指令", content="第一版正文")
+    updated = client.put(f"/api/prompt-library/{created['id']}", headers=_headers(token), json={
+        "name": created["name"], "prompt_type": created["prompt_type"],
+        "content": "第二版正文", "change_note": "改成第二版",
+    })
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["current_version"] == 2
+
+    restored = client.post(
+        f"/api/prompt-library/{created['id']}/versions/1/restore",
+        headers=_headers(token), json={"change_note": "第二版效果不佳"},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["current_version"] == 3
+    assert restored.json()["restored_from_version"] == 1
+    assert restored.json()["content"] == "第一版正文"
+
+    history = client.get(f"/api/prompt-library/{created['id']}/versions", headers=_headers(token))
+    assert history.status_code == 200, history.text
+    assert history.json()["current_version"] == 3
+    assert [item["version"] for item in history.json()["items"]] == [3, 2, 1]
+    assert history.json()["items"][0]["change_note"] == "第二版效果不佳"
+    assert history.json()["items"][0]["is_current"] is True
+    detail = client.get(f"/api/prompt-library/{created['id']}/versions/2", headers=_headers(token))
+    assert detail.status_code == 200
+    assert detail.json()["content"] == "第二版正文"
+    assert detail.json()["is_current"] is False
+
+
+def test_context_matching_orders_specific_prompt_and_returns_reasons(isolated_api):
+    username = "stage-b-context-match"
+    token = _token(username)
+    account = _create_account(username, "牙刷号")
+    product = _create_product(token, "椰子牙膏")
+    scene = _create_scene(token, "卫生间场景")
+    generic = _create_prompt(token, "高优先级通用", priority=100)
+    specific = _create_prompt(
+        token, "精准匹配", platform_account_id=account["id"], product_id=product["id"],
+        scene_id=scene["id"], scenes=["早晚刷牙", "口气护理"], priority=-100,
+    )
+    other_product_prompt = _create_prompt(
+        token, "其他产品", product_id=_create_product(token, "护腰")["id"], priority=100,
+    )
+
+    response = client.get("/api/prompt-library/recommend/match", headers=_headers(token), params={
+        "prompt_type": "rewrite", "account_id": account["id"], "product_id": product["id"],
+        "scene_id": scene["id"], "scene": "早晚刷牙教程",
+    })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["item"]["id"] == specific["id"], "精准匹配应压过通用指令的优先级"
+    assert body["item"]["match_reasons"] == [
+        "该账号专属", "匹配产品：椰子牙膏", "匹配场景：卫生间场景", "匹配关键词：早晚刷牙",
+    ]
+    assert generic["id"] in {item["id"] for item in body["candidates"]}
+    generic_item = next(item for item in body["candidates"] if item["id"] == generic["id"])
+    assert generic_item["match_reasons"] == ["全局通用"]
+    assert other_product_prompt["id"] in {item["id"] for item in body["candidates"]}, (
+        "产品和场景只用于推荐排序，不能让其他指令从手动选择列表消失"
+    )
+
+
+def test_recommendation_keeps_all_candidates_available_for_manual_selection(isolated_api):
+    token = _token("stage-b-all-candidates")
+    created = [_create_prompt(token, f"候选指令 {index}") for index in range(12)]
+
+    response = client.get(
+        "/api/prompt-library/recommend/match",
+        headers=_headers(token),
+        params={"prompt_type": "rewrite"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert {item["id"] for item in response.json()["candidates"]} == {item["id"] for item in created}

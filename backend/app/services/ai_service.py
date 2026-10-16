@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any, Protocol
 
@@ -42,6 +43,47 @@ def _proxy_kwargs() -> dict[str, Any]:
 def normalize_xhs_title(value: str, fallback: str = "") -> str:
     title = (value or fallback).strip().strip('"').strip("'").strip("《》")
     return title[:XHS_TITLE_MAX_LENGTH]
+
+
+_REWRITE_SECTION_PATTERN = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*{1,2})?(标题|正文|标签|话题标签)(?:\*{1,2})?\s*[:：]\s*(.*)$",
+    re.IGNORECASE,
+)
+_HASHTAG_ONLY_PATTERN = re.compile(r"^\s*(?:#[^#\s]+(?:\[话题\])?#?\s*)+$")
+
+
+def extract_rewritten_body(value: str) -> str:
+    text = (value or "").strip()
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        text = "\n".join(lines[1:-1]).strip()
+
+    parsed_lines: list[tuple[str | None, str]] = []
+    for line in text.splitlines():
+        match = _REWRITE_SECTION_PATTERN.match(line)
+        parsed_lines.append((match.group(1).lower(), match.group(2)) if match else (None, line))
+
+    body_start = next((index for index, (section, _) in enumerate(parsed_lines) if section == "正文"), None)
+    if body_start is not None:
+        body_lines = [parsed_lines[body_start][1]]
+        for section, line in parsed_lines[body_start + 1:]:
+            if section in {"标题", "标签", "话题标签"}:
+                break
+            body_lines.append(line)
+    else:
+        body_lines = [line for section, line in parsed_lines if section not in {"标题", "标签", "话题标签"}]
+
+    while body_lines and not body_lines[0].strip():
+        body_lines.pop(0)
+    while body_lines and not body_lines[-1].strip():
+        body_lines.pop()
+    while body_lines and _HASHTAG_ONLY_PATTERN.fullmatch(body_lines[-1]):
+        body_lines.pop()
+        while body_lines and not body_lines[-1].strip():
+            body_lines.pop()
+
+    body = "\n".join(body_lines).strip()
+    return body or text
 
 
 class TextAiClient(Protocol):
@@ -261,18 +303,20 @@ class OpenAICompatibleTextClient:
     ) -> str:
         # 用户从指令库选定或自己填写的指令，直接作为 system_prompt 取代默认人设。
         # 不叠加——用户明确要求「必须按照我的指令生成」。
-        return self._complete(
+        content = self._complete(
             model_config=model_config,
             api_key=api_key,
             system_prompt=system_prompt_override.strip()
             or "你是小红书内容运营编辑，负责在保留事实的前提下改写成自然、可发布的种草笔记。",
             # 用户指定了指令时不再塞默认要求，否则他的指令旁边会冒出系统自己的话。
             user_prompt=(
-                (f"改写要求：{instruction}\n\n" if instruction.strip()
+                "只改写正文。只输出改写后的正文内容，不要输出标题、标签、栏目名、解释或 Markdown 代码块。\n\n"
+                + (f"改写要求：{instruction}\n\n" if instruction.strip()
                  else ("" if system_prompt_override.strip() else "改写要求：提升表达、增强小红书语感\n\n"))
                 + f"标题：{title}\n\n正文：\n{body}"
             ),
         )
+        return extract_rewritten_body(content)
 
     def generate_note(
         self,

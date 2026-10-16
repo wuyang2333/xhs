@@ -12,5 +12,4 @@ echo ============================================
 echo   Update done. Press any key to restart.
 echo ============================================
 pause
-python main.py --host 0.0.0.0 --port 8000
-pause
+call XHS.bat start

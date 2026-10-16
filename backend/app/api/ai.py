@@ -75,6 +75,7 @@ class GenerateImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=6000)
     model_config_id: int | None = Field(default=None, ge=1)
     reference_images: list[str] = Field(default_factory=list)
+    size: str | None = Field(default=None, pattern=r"^\d{3,5}x\d{3,5}$", max_length=32)
     save_to_assets: bool = True
 
 
@@ -714,17 +715,22 @@ def generate_image(
     image_ai_client: ImageAiClient = Depends(get_image_ai_client),
 ):
     model_config, api_key = _selected_image_model_context(db, current_user, payload.model_config_id)
+    generation_kwargs: dict[str, Any] = {
+        "model_config": model_config,
+        "api_key": api_key,
+        "prompt": payload.prompt,
+        "reference_images": payload.reference_images or None,
+    }
+    # Keep omitted size compatible with providers and older test/dummy clients;
+    # the image client supplies its own provider default in that case.
+    if payload.size:
+        generation_kwargs["size"] = payload.size
     task, result = _recorded_image_task(
         db=db,
         current_user=current_user,
         task_type="ai_image_generate",
-        payload={"model_config_id": model_config.id, "prompt": payload.prompt, "reference_images": payload.reference_images},
-        action=lambda: image_ai_client.generate_image(
-            model_config=model_config,
-            api_key=api_key,
-            prompt=payload.prompt,
-            reference_images=payload.reference_images or None,
-        ),
+        payload={"model_config_id": model_config.id, "prompt": payload.prompt, "reference_images": payload.reference_images, "size": payload.size},
+        action=lambda: image_ai_client.generate_image(**generation_kwargs),
     )
     image_url, local_path = _persist_base64_image(result, current_user)
     response_data: dict = {"url": image_url, "raw": result.get("raw")}
@@ -733,7 +739,7 @@ def generate_image(
             user_id=current_user.id,
             prompt=payload.prompt,
             model_name=model_config.model_name,
-            params={"reference_images": payload.reference_images, "raw": result.get("raw")},
+            params={"reference_images": payload.reference_images, "size": payload.size, "raw": result.get("raw")},
             file_path=image_url,
         )
         db.add(asset)

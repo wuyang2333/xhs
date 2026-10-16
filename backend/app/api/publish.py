@@ -16,7 +16,7 @@ from backend.app.core.security import decrypt_text
 from backend.app.core.time import shanghai_now
 from backend.app.models import AccountCookieVersion, PlatformAccount, PublishAsset, PublishJob, Task, User
 from backend.app.schemas.common import paginated
-from backend.app.services.android_xhs_service import AndroidXhsService
+from backend.app.services.android_xhs_service import AndroidXhsService, android_device_publish_lock
 
 router = APIRouter(prefix="/publish", tags=["publish"])
 
@@ -242,6 +242,14 @@ def _get_owned_android_account(db: Session, current_user: User, job: PublishJob)
     return account
 
 
+def _android_user(account: PlatformAccount) -> str:
+    try:
+        options = json.loads(account.profile_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        options = {}
+    return str(options.get("android_user") or "0") if isinstance(options, dict) else "0"
+
+
 def _job_assets(db: Session, job: PublishJob) -> list[PublishAsset]:
     assets = db.scalars(
         select(PublishAsset).where(PublishAsset.publish_job_id == job.id).order_by(PublishAsset.sort_order.asc(), PublishAsset.id.asc())
@@ -251,15 +259,18 @@ def _job_assets(db: Session, job: PublishJob) -> list[PublishAsset]:
     return assets
 
 
-def _append_android_tags(job: PublishJob) -> str:
+def _android_topics(job: PublishJob) -> list[str]:
     options = _load_publish_options(job)
     topics = _clean_topics(options.get("topics") if isinstance(options.get("topics"), list) else None)
     if not topics:
         draft_tags = options.get("draft_tags")
         if isinstance(draft_tags, list):
-            topics = [str(item.get("name", "")).strip() for item in draft_tags if isinstance(item, dict)]
-    tags = " ".join(f"#{tag.lstrip('#')}" for tag in topics if tag)
-    return f"{job.body.rstrip()}\n\n{tags}".strip() if tags else job.body
+            topics = [
+                str(item.get("name", "")).strip()
+                for item in draft_tags
+                if isinstance(item, dict) and item.get("id")
+            ]
+    return [topic.lstrip("#") for topic in topics if topic]
 
 
 def _get_latest_account_cookies(db: Session, account_id: int) -> str:
@@ -359,17 +370,22 @@ def prepare_android_publish(
     if job.status in {"published", "publishing", "scheduled"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前发布任务不可发送到手机")
     if job.publish_mode == "scheduled":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="安卓手机发布不支持定时，请改为立即发布")
+        if job.scheduled_at is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="定时发布时间不能为空")
+        if job.scheduled_at <= shanghai_now():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="定时发布时间必须晚于当前时间")
     if not job.title.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="发布标题不能为空")
     account = _get_owned_android_account(db, current_user, job)
     try:
-        result = android_service.prepare(
-            serial=account.external_user_id or "",
-            user_id=current_user.id,
-            job_id=job.id,
-            assets=_job_assets(db, job),
-        )
+        with android_device_publish_lock(account.external_user_id or ""):
+            result = android_service.prepare(
+                serial=account.external_user_id or "",
+                android_user=_android_user(account),
+                user_id=current_user.id,
+                job_id=job.id,
+                assets=_job_assets(db, job),
+            )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
@@ -394,26 +410,38 @@ def direct_android_publish(
 ):
     """Publish the exact reviewed payload to the bound Android phone in one run."""
     job = _get_owned_publish_job(db, current_user, job_id)
-    if job.status in {"published", "publishing", "scheduled"}:
+    if job.status in {"queued", "published", "publishing", "scheduled"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前发布任务不可发布")
     if job.publish_mode == "scheduled":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="安卓手机发布不支持定时")
+        if job.scheduled_at is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="定时发布时间不能为空")
+        if job.scheduled_at <= shanghai_now():
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="定时发布时间必须晚于当前时间")
     if not job.title.strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="发布标题不能为空")
     account = _get_owned_android_account(db, current_user, job)
-    job.status = "publishing"
+    serial = account.external_user_id or ""
+    # Mark the job before waiting so other browsers see it queued and cannot
+    # submit the same job twice. Multiple Android user spaces share this lock.
+    job.status = "queued"
     job.publish_error = ""
     db.commit()
     try:
-        result = android_service.publish_direct(
-            serial=account.external_user_id or "",
-            user_id=current_user.id,
-            job_id=job.id,
-            assets=_job_assets(db, job),
-            title=job.title,
-            body=_append_android_tags(job),
-            product_keyword=str(_load_publish_options(job).get("product_keyword") or ""),
-        )
+        with android_device_publish_lock(serial):
+            job.status = "publishing"
+            db.commit()
+            result = android_service.publish_direct(
+                serial=serial,
+                android_user=_android_user(account),
+                user_id=current_user.id,
+                job_id=job.id,
+                assets=_job_assets(db, job),
+                title=job.title,
+                body=job.body,
+                topics=_android_topics(job),
+                product_keyword=str(_load_publish_options(job).get("product_keyword") or ""),
+                scheduled_at=job.scheduled_at.isoformat() if job.publish_mode == "scheduled" and job.scheduled_at else None,
+            )
     except Exception as exc:
         ambiguous = "publish result requires verification" in str(exc)
         job.status = "verification_required" if ambiguous else "failed"
@@ -427,9 +455,10 @@ def direct_android_publish(
     options.pop("android_stage", None)
     options.pop("android_review_image", None)
     _store_publish_options(job, options)
-    job.status = "published"
-    job.published_at = shanghai_now()
-    _record_publish_control_task(db, current_user, job, "android_publish_direct")
+    is_scheduled = job.publish_mode == "scheduled" or result.get("status") == "scheduled"
+    job.status = "scheduled" if is_scheduled else "published"
+    job.published_at = None if is_scheduled else shanghai_now()
+    _record_publish_control_task(db, current_user, job, "android_publish_scheduled" if is_scheduled else "android_publish_direct")
     db.commit()
     db.refresh(job)
     return serialize_publish_job(job)
@@ -449,13 +478,16 @@ def fill_android_publish(
     if not isinstance(options.get("android_stage"), dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请先发送图片到手机")
     try:
-        file_name = android_service.fill_for_review(
-            serial=account.external_user_id or "",
-            user_id=current_user.id,
-            job_id=job.id,
-            title=job.title,
-            body=_append_android_tags(job),
-        )
+        with android_device_publish_lock(account.external_user_id or ""):
+            file_name = android_service.fill_for_review(
+                serial=account.external_user_id or "",
+                android_user=_android_user(account),
+                user_id=current_user.id,
+                job_id=job.id,
+                title=job.title,
+                body=job.body,
+                topics=_android_topics(job),
+            )
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     options["android_review_image"] = f"/api/files/media/{file_name}"
@@ -538,7 +570,7 @@ def delete_publish_job(
     db: Session = Depends(get_db),
 ):
     job = _get_owned_publish_job(db, current_user, job_id)
-    if job.status in {"publishing", "uploading"}:
+    if job.status in {"queued", "publishing", "uploading"}:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="正在进行中的任务无法删除")
 
     for asset in db.scalars(
